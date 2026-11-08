@@ -21,8 +21,12 @@ def parser() -> argparse.ArgumentParser:
     modem.add_argument("--device")
     sub.add_parser("hardware-checklist", help="Print unverified H1/H2 acceptance checklist")
     prototype = sub.add_parser("voice-prototype", help="Paid microphone test, no phone modem")
-    prototype.add_argument("--profile", required=True)
+    prototype.add_argument("--profile", help="Omit to ask the caller for a family recipient")
     sub.add_parser("audio-devices", help="List local microphone/speaker devices")
+    simulation = sub.add_parser("simulate", help="Run a synthetic call without network or audio")
+    simulation.add_argument("--recipient")
+    simulation.add_argument("--message", default="Please call me back tomorrow.")
+    simulation.add_argument("--state-dir", type=Path, default=Path("data-simulation"))
     return p
 
 
@@ -44,6 +48,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False))
             return 0
         settings = Settings.load(args.profiles, args.env_file)
+        if args.command == "simulate":
+            from call_secretary.calls import simulate
+            from call_secretary.locking import InstanceLock
+            from call_secretary.storage import Store
+
+            with Store(args.state_dir) as store, InstanceLock(store.path.parent / "runtime.lock"):
+                store.recover_calls()
+                cid = asyncio.run(simulate(store, settings.family, args.recipient, args.message))
+                print(json.dumps({"call_id": cid, "status": "simulated", **store.counts()}))
+            return 0
         if args.command == "voice-prototype":
             from call_secretary.runtime import run_microphone
 

@@ -132,9 +132,12 @@ class Store:
         original_called_number: str | None = None,
         *,
         now: float | None = None,
+        single_active: bool = False,
     ) -> str:
         cid = str(uuid.uuid4())
         with self.transaction() as db:
+            if single_active and db.execute("SELECT 1 FROM calls WHERE ended IS NULL").fetchone():
+                raise StorageError("Another call is active")
             db.execute(
                 "INSERT INTO calls(id,ingress_id,caller_number,original_called_number,started)"
                 " VALUES(?,?,?,?,?)",

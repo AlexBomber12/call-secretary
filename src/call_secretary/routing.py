@@ -132,3 +132,11 @@ class Router:
                 }
             )
         return result
+
+    def max_prompt_bytes(self) -> int:
+        profiles: list[Profile | None] = [None, *self.family.profiles]
+        return max(
+            len(self.instructions(p).encode("utf-8"))
+            + len(json.dumps(self.tools(p), ensure_ascii=False).encode("utf-8"))
+            for p in profiles
+        )

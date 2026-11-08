@@ -1,75 +1,40 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from decimal import Decimal
-from typing import Any
 
 from call_secretary.audio import AudioEndpoint, Microphone
-from call_secretary.budget import BudgetError, Deadline, Ledger, RateCard
-from call_secretary.config import ConfigError, Profile, Settings
-from call_secretary.routing import Router
+from call_secretary.budget import Deadline, RateCard
+from call_secretary.config import ConfigError, Settings
+from call_secretary.locking import InstanceLock
+from call_secretary.routing import Incoming, Router
 from call_secretary.storage import Store
-from call_secretary.voice import Realtime, ToolReply, VoiceError, connect_api
+from call_secretary.voice import Realtime, VoiceError, connect_api
 
 
-class RecordingHooks:
-    def __init__(self, store: Store, ledger: Ledger, rates: RateCard, cid: str):
-        self.store, self.ledger, self.rates, self.cid = store, ledger, rates, cid
+async def run_microphone(settings: Settings, profile_id: str | None) -> str:
+    from call_secretary.calls import CallController
 
-    async def text(
-        self, item_id: str, role: str, text: str, interrupted: bool, created: float
-    ) -> None:
-        self.store.utterance(self.cid, item_id, role, text, interrupted=interrupted, now=created)
-
-    async def interrupted(self, item_id: str) -> None:
-        self.store.interrupt_utterance(self.cid, item_id)
-
-    async def usage(self, response_id: str, usage: dict[str, Any]) -> None:
-        cost = self.rates.response_cost(usage)
-        if not self.ledger.consume(self.cid, f"{self.cid}:{response_id}", cost):
-            raise BudgetError("Provider usage exceeded reserved allowance")
-
-    async def tool(self, name: str, arguments: dict[str, Any]) -> ToolReply:
-        if name == "finish_call" and not arguments:
-            return ToolReply("finished", finish=True)
-        return ToolReply("unsupported_tool")
-
-
-def prompt_reservation(router: Router, rates: RateCard, seconds: int) -> Decimal:
-    profiles: list[Profile | None] = [None, *router.family.profiles]
-    size = max(
-        len(router.instructions(p).encode("utf-8"))
-        + len(json.dumps(router.tools(p), ensure_ascii=False).encode("utf-8"))
-        for p in profiles
-    )
-    return rates.reservation(size, seconds)
-
-
-async def run_microphone(settings: Settings, profile_id: str) -> str:
     settings.validate_live()
     rates = RateCard.load(settings.env)
-    profile = settings.family.profile(profile_id)
-    if not profile.enabled:
-        raise ConfigError("Enable the selected profile before microphone testing")
+    if not any(p.enabled for p in settings.family.profiles):
+        raise ConfigError("Enable a profile before microphone testing")
     router = Router(settings.family)
-    with Store(settings.state_dir) as store:
-        cid = store.create_call("microphone")
-        store.route_call(cid, profile.id, "operator_selected")
-        ledger = Ledger(store, settings.family.monthly_budget_eur, settings.family.timezone)
-        try:
-            ledger.reserve(
-                cid,
-                prompt_reservation(router, rates, settings.family.max_duration_seconds),
-                horizon_seconds=settings.family.max_duration_seconds + 60,
-            )
-        except BudgetError:
-            store.end_call(cid, "budget_refused")
-            raise
-        hooks = RecordingHooks(store, ledger, rates, cid)
+    with Store(settings.state_dir) as store, InstanceLock(store.path.parent / "runtime.lock"):
+        store.recover_calls()
+        controller = CallController(
+            store,
+            settings.family,
+            Incoming("microphone"),
+            rates=rates,
+            paid=True,
+            operator_profile=profile_id,
+        )
+        cid = controller.cid
         endpoint: AudioEndpoint | None = None
         voice: Realtime | None = None
         closer: asyncio.Task[None] | None = None
+        monitor: asyncio.Task[None] | None = None
         status = "interrupted"
         attempted = False
         try:
@@ -79,10 +44,10 @@ async def run_microphone(settings: Settings, profile_id: str) -> str:
                 session = Realtime(
                     socket,
                     endpoint,
-                    hooks,
+                    controller,
                     rates,
-                    router.instructions(profile),
-                    router.tools(profile),
+                    router.instructions(controller.profile),
+                    router.tools(controller.profile),
                     settings.env["REALTIME_VOICE"],
                 )
                 voice = session
@@ -92,6 +57,7 @@ async def run_microphone(settings: Settings, profile_id: str) -> str:
                     await session.close_soon()
 
                 closer = asyncio.create_task(closing())
+                monitor = asyncio.create_task(controller.monitor(session))
                 await Deadline(settings.family.max_duration_seconds).run(session.run())
                 status = "ended"
         except TimeoutError:
@@ -102,6 +68,9 @@ async def run_microphone(settings: Settings, profile_id: str) -> str:
             if closer:
                 closer.cancel()
                 await asyncio.gather(closer, return_exceptions=True)
+            if monitor:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
             if endpoint:
                 try:
                     await endpoint.close()
@@ -116,9 +85,9 @@ async def run_microphone(settings: Settings, profile_id: str) -> str:
                         * rates.transcription_usd_per_minute
                         * rates.usd_to_eur_upper_bound
                     )
-                    ledger.consume(cid, f"{cid}:transcription_allowance", allowance)
+                    controller.ledger.consume(cid, f"{cid}:transcription_allowance", allowance)
             finally:
-                store.end_call(cid, status, voice_usage_complete=complete)
+                controller.finish(status, usage_complete=complete)
         if status not in {"ended", "duration_limit"}:
             raise VoiceError("Voice prototype interrupted; pending state retained")
         return cid

@@ -35,6 +35,7 @@ class ToolReply:
 
 
 class VoiceHooks(Protocol):
+    async def activity(self, speaking: bool | None = None) -> None: ...
     async def text(
         self, item_id: str, role: str, text: str, interrupted: bool, created: float
     ) -> None: ...
@@ -208,6 +209,7 @@ class Realtime:
             self.ready = True
             await self.request_response(initial=True)
         elif kind == "input_audio_buffer.speech_started":
+            await self.hooks.activity(speaking=True)
             if self.active_response_id:
                 self.discarded_responses.add(self.active_response_id)
             if self._finish_task:
@@ -228,6 +230,8 @@ class Realtime:
                         "audio_end_ms": duration,
                     }
                 )
+        elif kind == "input_audio_buffer.speech_stopped":
+            await self.hooks.activity(speaking=False)
         elif kind == "input_audio_buffer.committed":
             item_id = str(event.get("item_id", ""))
             if item_id not in self.committed_items:
@@ -287,6 +291,7 @@ class Realtime:
                 self.usage_complete = False
                 raise VoiceError("Provider usage is unavailable; reservation remains held")
             await self.hooks.usage(rid, usage)
+            await self.hooks.activity()
             if response.get("status") not in {"completed", "cancelled"}:
                 self.usage_complete = False
                 raise VoiceError("Voice response failed")

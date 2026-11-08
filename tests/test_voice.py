@@ -40,6 +40,9 @@ class Socket:
 
 
 class Hooks:
+    async def activity(self, speaking=None):
+        pass
+
     def __init__(self):
         self.texts = []
         self.usages = []
