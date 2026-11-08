@@ -155,26 +155,30 @@ class Enrollment:
             )
 
     def import_explicit_destinations(self) -> None:
+        """Import YAML destinations and synchronize all existing private bindings."""
         with self.store.transaction() as db:
             for p in self.family.profiles:
-                if not p.telegram_chat_id:
-                    continue
-                old = db.execute(
-                    "SELECT chat_id FROM bindings WHERE profile_id=?", (p.id,)
-                ).fetchone()
-                if old and old[0] != p.telegram_chat_id:
-                    raise ConfigError(
-                        "Destination differs from enrolled chat; explicit unbind required"
+                if p.telegram_chat_id:
+                    old = db.execute(
+                        "SELECT chat_id FROM bindings WHERE profile_id=?", (p.id,)
+                    ).fetchone()
+                    if old and old[0] != p.telegram_chat_id:
+                        raise ConfigError(
+                            "Destination differs from enrolled chat; explicit unbind required"
+                        )
+                    db.execute(
+                        "INSERT OR IGNORE INTO bindings VALUES(?,?,?)",
+                        (p.id, p.telegram_chat_id, int(p.enabled)),
                     )
                 db.execute(
-                    "INSERT INTO bindings VALUES(?,?,?) ON CONFLICT(profile_id) "
-                    "DO UPDATE SET enabled=excluded.enabled",
-                    (p.id, p.telegram_chat_id, int(p.enabled)),
+                    "UPDATE bindings SET enabled=? WHERE profile_id=?", (int(p.enabled), p.id)
                 )
                 db.execute(
-                    "UPDATE outbox SET chat_id=?,state='pending',not_before=0 "
-                    "WHERE profile_id=? AND state='waiting_destination' AND ?=1",
-                    (p.telegram_chat_id, p.id, int(p.enabled)),
+                    "UPDATE outbox SET chat_id=(SELECT chat_id FROM bindings WHERE profile_id=?),"
+                    "state='pending',not_before=0 WHERE profile_id=? "
+                    "AND state='waiting_destination' AND EXISTS "
+                    "(SELECT 1 FROM bindings WHERE profile_id=? AND enabled=1)",
+                    (p.id, p.id, p.id),
                 )
 
 

@@ -24,6 +24,7 @@ def test_unbind_revokes_ungenerated_reports_including_active_calls(tmp_path, fam
                 cid = await simulate(store, family, "member_a", "private old message")
             enroll.unbind("member_a")
             enroll.claim(enroll.invite("member_a"), "102")
+            enroll.import_explicit_destinations()
             if active:
                 store.end_call(cid)
             await SummaryWorker(store, family).process_one()
@@ -39,6 +40,30 @@ def test_unbind_revokes_ungenerated_reports_including_active_calls(tmp_path, fam
             await DeliveryWorker(store, family, api).process_one()
             assert len(api.sent) == 1 and api.sent[0]["chat_id"] == "102"
             assert new in api.sent[0]["text"] and cid not in api.sent[0]["text"]
+
+    asyncio.run(scenario())
+
+
+def test_reenabled_invitation_binding_releases_waiting_reports_after_restart(tmp_path, family):
+    async def scenario():
+        with Store(tmp_path / "state") as store:
+            enroll = Enrollment(store, family)
+            enroll.claim(enroll.invite("member_a"), "101")
+            cid = await simulate(store, family, "member_a", "waiting private message")
+            disabled = replace(
+                family, profiles=(replace(family.profiles[0], enabled=False), *family.profiles[1:])
+            )
+            await SummaryWorker(store, disabled).process_one()
+            Enrollment(store, disabled).import_explicit_destinations()
+            assert (
+                store.db.execute("SELECT state FROM outbox").fetchone()[0] == "waiting_destination"
+            )
+        with Store(tmp_path / "state") as store:
+            Enrollment(store, family).import_explicit_destinations()
+            api = API()
+            assert await DeliveryWorker(store, family, api).process_one()
+            assert len(api.sent) == 1 and api.sent[0]["chat_id"] == "101"
+            assert cid in api.sent[0]["text"]
 
     asyncio.run(scenario())
 
