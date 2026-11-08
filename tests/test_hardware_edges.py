@@ -103,3 +103,17 @@ def test_posix_lock_and_repeated_release_with_fake_system_module(tmp_path, monke
     flock.side_effect = OSError("busy")
     with pytest.raises(RuntimeError, match="Another"):
         lock.__enter__()
+
+
+def test_windows_lock_initializes_the_lock_byte_once_on_either_platform(tmp_path, monkeypatch):
+    acquire = Mock()
+    monkeypatch.setattr(locking, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(locking=acquire, LK_NBLCK=2))
+    path = tmp_path / "lock"
+    for _ in range(2):
+        with locking.InstanceLock(path):
+            assert path.read_bytes() == b"0"
+    assert acquire.call_count == 2
+    acquire.side_effect = OSError("busy")
+    with pytest.raises(RuntimeError, match="Another"):
+        locking.InstanceLock(path).__enter__()
