@@ -296,7 +296,22 @@ class Realtime:
             if response.get("status") not in {"completed", "cancelled"}:
                 self.usage_complete = False
                 raise VoiceError("Voice response failed")
-            if response.get("status") == "cancelled":
+            if response.get("status") == "cancelled" or rid in self.discarded_responses:
+                if response.get("status") == "completed":
+                    for item in response.get("output", []):
+                        if item.get("type") == "function_call":
+                            await self.send(
+                                {
+                                    "type": "conversation.item.create",
+                                    "item": {
+                                        "type": "function_call_output",
+                                        "call_id": item["call_id"],
+                                        "output": json.dumps(
+                                            {"error": "interrupted_response_ignored"}
+                                        ),
+                                    },
+                                }
+                            )
                 if self.user_pending:
                     await self.request_response()
                 return

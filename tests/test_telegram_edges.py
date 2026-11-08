@@ -125,7 +125,8 @@ def test_delivery_blocks_invalid_private_destination(tmp_path, family, reason):
             api = API()
             assert await DeliveryWorker(store, actual_family, api).process_one()
             assert not api.sent
-            assert store.db.execute("SELECT state FROM outbox").fetchone()[0] == "blocked"
+            expected = "waiting_destination" if reason in {"disabled", "revoked"} else "blocked"
+            assert store.db.execute("SELECT state FROM outbox").fetchone()[0] == expected
 
     asyncio.run(scenario())
 

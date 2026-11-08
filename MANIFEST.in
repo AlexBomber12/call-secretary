@@ -1,0 +1,5 @@
+include AGENTS.md .env.example requirements.lock
+include config/family.example.yaml
+include tests/conftest.py
+recursive-include docs *.md
+recursive-include scripts *.py *.sh

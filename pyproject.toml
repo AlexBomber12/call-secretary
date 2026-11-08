@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools==80.9.0"]
+requires = ["setuptools==84.1.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -16,7 +16,7 @@ dependencies = [
 audio = ["sounddevice==0.5.3"]
 modem = ["pyserial==3.5"]
 dev = [
-  "pytest==8.4.1", "pytest-cov==6.2.1", "coverage==7.10.6",
+  "pytest==9.0.3", "pytest-cov==6.2.1", "coverage==7.10.6",
   "ruff==0.12.11", "mypy==1.17.1",
 ]
 

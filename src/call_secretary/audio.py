@@ -75,11 +75,16 @@ class Microphone:
 
     async def close(self) -> None:
         def close() -> None:
-            self._input.abort()
-            self._input.close()
+            failed = False
             with self._lock:
-                self._output.abort()
-                self._output.close()
+                for stream in (self._input, self._output):
+                    for operation in (stream.abort, stream.close):
+                        try:
+                            operation()
+                        except Exception:
+                            failed = True
+            if failed:
+                raise AudioError("Audio device cleanup failed")
 
         await asyncio.to_thread(close)
 

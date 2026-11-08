@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -17,7 +18,7 @@ class ModemError(RuntimeError):
 
 class SerialIO(Protocol):
     def write(self, data: bytes) -> int: ...
-    def readline(self) -> bytes: ...
+    def read(self, size: int) -> bytes: ...
     def close(self) -> None: ...
 
 
@@ -33,15 +34,24 @@ def at_query(
 ) -> list[str]:
     if command not in READ_ONLY:
         raise ModemError("Only allowlisted read-only AT queries are accepted")
-    port.write((command + "\r").encode("ascii"))
+    data = (command + "\r").encode("ascii")
+    if port.write(data) != len(data):
+        raise ModemError("Diagnostic command write is incomplete")
     deadline = clock() + timeout
     lines: list[str] = []
     size = 0
+    buffer = bytearray()
     while clock() < deadline:
-        raw = port.readline()
-        size += len(raw)
-        if size > 16384:
-            raise ModemError("Modem response exceeds size limit")
+        delimiter = re.search(rb"[\r\n]", buffer)
+        if delimiter is None:
+            raw = port.read(1024)
+            size += len(raw)
+            if size > 16384:
+                raise ModemError("Modem response exceeds size limit")
+            buffer.extend(raw)
+            continue
+        raw = bytes(buffer[: delimiter.start()])
+        del buffer[: delimiter.end()]
         text = raw.decode("ascii", errors="replace").strip()
         if text == "OK":
             return lines

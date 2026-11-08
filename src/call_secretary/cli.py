@@ -8,6 +8,7 @@ import sys
 from decimal import Decimal
 from pathlib import Path
 
+from call_secretary.budget import BudgetError
 from call_secretary.config import ConfigError, Settings
 
 
@@ -274,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    except ConfigError as exc:
+    except (ConfigError, BudgetError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
     except Exception:

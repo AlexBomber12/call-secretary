@@ -12,7 +12,7 @@ class Port:
         self.writes.append(data)
         return len(data)
 
-    def readline(self):
+    def read(self, size):
         return next(self.lines, b"")
 
 

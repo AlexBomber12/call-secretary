@@ -29,6 +29,9 @@ def test_ledger_refuses_unreserved_closed_or_unknown_paid_work(tmp_path):
         with pytest.raises(BudgetError):
             ledger.reconcile(cid, Decimal(1))
         ledger.reserve(cid, Decimal(2))
+        store.end_call(cid)
+        job = store.claim_job("summary_jobs")
+        store.complete_summary(cid, job["lease_token"], {"report": "synthetic final report"}, None)
         ledger.reconcile(cid, Decimal("1.25"))
         assert ledger.status()["accounted_eur"] == "1.25"
         with pytest.raises(BudgetError):

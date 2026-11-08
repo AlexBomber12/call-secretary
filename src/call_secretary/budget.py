@@ -110,6 +110,15 @@ class Ledger:
                 "SELECT 1 FROM budget_reservations WHERE call_id=?", (cid,)
             ).fetchone():
                 raise BudgetError("Unknown budget reservation")
+            unfinished = db.execute(
+                "SELECT 1 FROM calls WHERE id=? AND ended IS NULL UNION ALL "
+                "SELECT 1 FROM summary_jobs WHERE call_id=? AND state IN ('pending','leased')",
+                (cid, cid),
+            ).fetchone()
+            if unfinished:
+                raise BudgetError(
+                    "Wait for the call and summary work to finish before reconciliation"
+                )
             db.execute(
                 "UPDATE budget_reservations SET consumed=?,closed=1 WHERE call_id=?", (amount, cid)
             )
