@@ -6,4 +6,4 @@
 
 H1 requires actual incoming answer/hangup, simultaneous USB capture/playback and reconnection with the intended SIM/firmware. H2 compares all family forwarding paths, same/hidden caller ID, and evidence for the original called recipient. Missing original-recipient metadata selects the ask-recipient mode; a generic forwarding notification does not select a person.
 
-The current read-only probe does not answer a call or prove USB voice. The active call/audio test and production adapters remain gated on physical access; no global ModemManager changes or USB resets are included.
+The current read-only probe does not answer a call or prove USB voice. An [injected-port control core](sim7600-control.md) is tested offline; no hardware opener or phone-service command uses it yet. Active call/audio testing and production integration remain gated on physical access; no global ModemManager changes or USB resets are included.
