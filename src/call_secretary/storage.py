@@ -291,6 +291,7 @@ class Store:
         destination: str | None,
         *,
         now: float | None = None,
+        settle_budget: bool = False,
     ) -> bool:
         with self.transaction() as db:
             job = db.execute(
@@ -304,20 +305,29 @@ class Store:
                 "INSERT INTO summaries VALUES(?,?,?) ON CONFLICT(call_id) DO NOTHING",
                 (cid, content, time.time() if now is None else now),
             )
-            if call["profile_id"] and destination:
+            if call["profile_id"]:
                 text = str(summary["report"])
                 if not 1 <= len(text) <= 4000:
                     raise StorageError("Report must fit one Telegram message")
                 db.execute(
-                    "INSERT OR IGNORE INTO outbox(id,call_id,profile_id,chat_id,text) "
-                    "VALUES(?,?,?,?,?)",
-                    (str(uuid.uuid4()), cid, call["profile_id"], destination, text),
+                    "INSERT OR IGNORE INTO outbox(id,call_id,profile_id,chat_id,text,state) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        str(uuid.uuid4()),
+                        cid,
+                        call["profile_id"],
+                        destination or "",
+                        text,
+                        "pending" if destination else "waiting_destination",
+                    ),
                 )
             db.execute(
                 "UPDATE summary_jobs SET state='complete',lease_token=NULL,lease_until=0 "
                 "WHERE call_id=?",
                 (cid,),
             )
+            if settle_budget:
+                db.execute("UPDATE budget_reservations SET closed=1 WHERE call_id=?", (cid,))
             return True
 
     def delivery_complete(self, oid: str, token: str) -> None:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import io
 import json
+import sys
 from pathlib import Path
 
 from call_secretary.config import ConfigError, Settings
@@ -27,10 +29,17 @@ def parser() -> argparse.ArgumentParser:
     simulation.add_argument("--recipient")
     simulation.add_argument("--message", default="Please call me back tomorrow.")
     simulation.add_argument("--state-dir", type=Path, default=Path("data-simulation"))
+    simulation.add_argument("--show-report", action="store_true")
+    process = sub.add_parser("process-once", help="Process one durable summary job")
+    process.add_argument(
+        "--offline", action="store_true", help="Use a labelled original-text fallback"
+    )
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
     try:
         if args.command == "audio-devices":
@@ -52,11 +61,42 @@ def main(argv: list[str] | None = None) -> int:
             from call_secretary.calls import simulate
             from call_secretary.locking import InstanceLock
             from call_secretary.storage import Store
+            from call_secretary.summaries import SummaryWorker
 
             with Store(args.state_dir) as store, InstanceLock(store.path.parent / "runtime.lock"):
                 store.recover_calls()
-                cid = asyncio.run(simulate(store, settings.family, args.recipient, args.message))
+
+                async def scenario() -> str:
+                    cid = await simulate(store, settings.family, args.recipient, args.message)
+                    worker = SummaryWorker(store, settings.family)
+                    for _ in range(100):
+                        if not await worker.process_one():
+                            break
+                    return cid
+
+                cid = asyncio.run(scenario())
                 print(json.dumps({"call_id": cid, "status": "simulated", **store.counts()}))
+                if args.show_report:
+                    row = store.db.execute(
+                        "SELECT content FROM summaries WHERE call_id=?", (cid,)
+                    ).fetchone()
+                    if row:
+                        print(json.loads(row[0])["report"])
+            return 0
+        if args.command == "process-once":
+            from call_secretary.budget import RateCard
+            from call_secretary.storage import Store
+            from call_secretary.summaries import OpenAISummary, SummaryWorker
+
+            provider, rates = None, None
+            if not args.offline:
+                settings.require("OPENAI_API_KEY")
+                rates = RateCard.load(settings.env)
+                provider = OpenAISummary(settings.env["OPENAI_API_KEY"])
+            with Store(settings.state_dir) as store:
+                worker = SummaryWorker(store, settings.family, provider=provider, rates=rates)
+                processed = asyncio.run(worker.process_one())
+                print(json.dumps({"processed_summary": processed, **store.counts()}))
             return 0
         if args.command == "voice-prototype":
             from call_secretary.runtime import run_microphone
