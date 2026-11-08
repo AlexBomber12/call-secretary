@@ -74,7 +74,10 @@ def test_runtime_persists_final_state_and_keeps_unknown_cost(
         async def run(self, op):
             return await op
 
-    monkeypatch.setattr(runtime, "Microphone", Audio)
+    async def open_audio():
+        return Audio()
+
+    monkeypatch.setattr(runtime.IsolatedAudio, "open", open_audio)
     monkeypatch.setattr(runtime, "connect_api", connect)
     monkeypatch.setattr(runtime, "Realtime", Session)
     monkeypatch.setattr(runtime, "Deadline", Timer)

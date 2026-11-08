@@ -180,6 +180,7 @@ def render(
     )
     states = {
         "ru": {
+            "caller_hangup": "завершён звонящим",
             "ended": "завершён",
             "interrupted": "прерван",
             "duration_limit": "лимит времени",
@@ -192,6 +193,7 @@ def render(
             "unassigned": "адресат не определён",
         },
         "it": {
+            "caller_hangup": "terminata dal chiamante",
             "ended": "conclusa",
             "interrupted": "interrotta",
             "duration_limit": "limite di durata",
@@ -201,6 +203,7 @@ def render(
             "ended_text_incomplete": "trascrizione incompleta",
         },
         "en": {
+            "caller_hangup": "ended by caller",
             "ended": "completed",
             "interrupted": "interrupted",
             "duration_limit": "duration limit",

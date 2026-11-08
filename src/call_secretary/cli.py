@@ -23,6 +23,7 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--live", action="store_true")
     check.add_argument("--modem", action="store_true")
     sub.add_parser("status", help="Show readiness, never secrets or transcript contents")
+    sub.add_parser("phone-run", help="Run accepted dedicated hardware; requires explicit H1 gate")
     modem = sub.add_parser("modem-inspect", help="List ports, or inspect one explicit device")
     modem.add_argument("--device")
     sub.add_parser("hardware-checklist", help="Print unverified H1/H2 acceptance checklist")
@@ -76,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False))
             return 0
         settings = Settings.load(args.profiles, args.env_file)
+        if args.command == "phone-run":
+            from call_secretary.phone import run_phone
+
+            asyncio.run(run_phone(settings))
+            return 0
         if args.command in {"invite", "unbind", "budget-reconcile", "backup"}:
             import re
 
@@ -234,12 +240,14 @@ def main(argv: list[str] | None = None) -> int:
                         )
         if args.command == "status":
             from call_secretary.budget import Ledger
+            from call_secretary.health import snapshot
             from call_secretary.storage import Store
             from call_secretary.summaries import destination
 
             state = {"calls": 0, "summary_pending": 0, "delivery_pending": 0}
             enrolled = 0
             budget_status = None
+            health_status = None
             if settings.state_dir.exists():
                 with Store(settings.state_dir) as store:
                     state = store.counts()
@@ -247,15 +255,19 @@ def main(argv: list[str] | None = None) -> int:
                     budget_status = Ledger(
                         store, settings.family.monthly_budget_eur, settings.family.timezone
                     ).status()
+                    health_status = snapshot(store)
             print(
                 json.dumps(
                     {
-                        "phone_service": "awaiting_hardware_integration",
+                        "phone_service": "hardware_gated",
+                        "hardware_accepted_by_operator": settings.env.get("PHONE_H1_CONFIRMED")
+                        == "true",
                         **state,
                         "profiles": len(settings.family.profiles),
                         "profiles_enabled": sum(p.enabled for p in settings.family.profiles),
                         "profiles_enrolled": enrolled,
                         "budget": budget_status,
+                        "health": health_status,
                         "voice_key_configured": bool(settings.env.get("OPENAI_API_KEY")),
                         "telegram_token_configured": bool(settings.env.get("TELEGRAM_BOT_TOKEN")),
                     }

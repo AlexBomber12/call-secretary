@@ -1,4 +1,4 @@
-"""Offline-tested SIM7600 control core; no device opener or live service entry point."""
+"""Offline-tested SIM7600 control core; hardware-gated opener/service are in phone.py."""
 
 from __future__ import annotations
 

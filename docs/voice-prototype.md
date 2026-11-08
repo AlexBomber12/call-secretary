@@ -11,4 +11,6 @@ The 10-minute timeout is independent of the model. Every response has a token li
 
 Before accepting live voice, check IT/RU/EN, the voice, actual playback/truncation latency, device errors and usage. Automated tests do not establish microphone or phone quality.
 
+Native capture/playback now run in independently killable spawned processes. Timeout/cancellation reaps a hung worker instead of leaving a PortAudio thread behind. See [isolation and operational limits](server-operations.md). This changes the failure boundary; it does not certify a real microphone or USB endpoint.
+
 Implementation sources reviewed 2026-11-08: [Realtime conversations](https://developers.openai.com/api/docs/guides/realtime-conversations), [client events](https://developers.openai.com/api/reference/resources/realtime/client-events), [pricing](https://developers.openai.com/api/docs/pricing), [GPT-4.1 mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini).

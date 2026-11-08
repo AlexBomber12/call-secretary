@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 
-from call_secretary.audio import AudioEndpoint, Microphone
+from call_secretary.audio import AudioEndpoint
 from call_secretary.budget import Deadline, RateCard
 from call_secretary.config import ConfigError, Settings
+from call_secretary.isolated_audio import IsolatedAudio
 from call_secretary.locking import InstanceLock
 from call_secretary.routing import Incoming, Router
 from call_secretary.storage import Store
@@ -42,7 +43,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
         status = "interrupted"
         attempted = False
         try:
-            endpoint = Microphone()
+            endpoint = await IsolatedAudio.open()
             attempted = True
             async with connect_api(settings.env["OPENAI_API_KEY"], rates.model) as socket:
                 session = Realtime(
