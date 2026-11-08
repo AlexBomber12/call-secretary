@@ -129,8 +129,12 @@ def main(argv: list[str] | None = None) -> int:
             settings.require("TELEGRAM_BOT_TOKEN")
             worker_provider, worker_rates = None, None
             if not args.offline_summaries and settings.env.get("OPENAI_API_KEY"):
-                worker_rates = RateCard.load(settings.env)
-                worker_provider = OpenAISummary(settings.env["OPENAI_API_KEY"])
+                try:
+                    worker_rates = RateCard.load(settings.env)
+                except ConfigError:
+                    pass  # Invalid paid policy must not disable free reports or enrollment.
+                if worker_rates:
+                    worker_provider = OpenAISummary(settings.env["OPENAI_API_KEY"])
 
             async def work() -> None:
                 client = TelegramClient(settings.env["TELEGRAM_BOT_TOKEN"])

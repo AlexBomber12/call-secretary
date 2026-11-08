@@ -171,6 +171,12 @@ async def handle_call(
             status = "budget_refused" if isinstance(exc, BudgetError) else "provider_or_audio_error"
             health.update(store, "voice", "unavailable")
             # The watcher remains active while the local prompt plays.
+            if attempted:
+                # Realtime cancellation may have killed a native output lane.
+                # Cleanup must succeed before opening replacement workers; an
+                # unreaped native failure stays fatal through final cleanup.
+                await endpoint.close()
+                endpoint = await audio_factory(options.audio)
             await endpoint.interrupt()
             for offset in range(0, len(phrase), FRAME_BYTES):
                 await endpoint.write(phrase[offset : offset + FRAME_BYTES])

@@ -1,5 +1,6 @@
 import asyncio
 import multiprocessing as mp
+import sys
 import time
 from collections import deque
 from types import SimpleNamespace
@@ -33,7 +34,8 @@ class Pipe:
 @pytest.mark.parametrize("direction", ["input", "output"])
 @pytest.mark.parametrize("rate", [8000, 16000, 24000, 48000])
 def test_worker_duplex_pcm_rate_conversion_and_interrupt(monkeypatch, direction, rate):
-    import sounddevice as sd
+    sd = SimpleNamespace(RawInputStream=None, RawOutputStream=None, query_devices=None)
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
 
     stream = Mock(latency=0.02)
     stream.read.return_value = (b"\x01\x00" * (rate // 50), False)
@@ -61,7 +63,8 @@ def test_worker_duplex_pcm_rate_conversion_and_interrupt(monkeypatch, direction,
 
 @pytest.mark.parametrize("outcome", ["open", "overflow", "short", "command", "broken"])
 def test_worker_errors_are_reduced_and_ipc_closes_before_native_cleanup(monkeypatch, outcome):
-    import sounddevice as sd
+    sd = SimpleNamespace(RawInputStream=None)
+    monkeypatch.setitem(sys.modules, "sounddevice", sd)
 
     stream = Mock(latency=0)
     stream.read.return_value = (b"x" if outcome == "short" else b"\0" * 960, outcome == "overflow")
@@ -132,10 +135,13 @@ def test_stop_escalates_native_hang_from_terminate_to_kill(monkeypatch, alive):
     if alive[-1]:
         with pytest.raises(AudioError, match="reaped"):
             lane.stop()
+        with pytest.raises(AudioError):
+            lane.stop()  # Fatal failure survives IPC closure and repeated cleanup.
     else:
         lane.stop()
         process.close.assert_called_once()
-    lane.stop()
+    if not alive[-1]:
+        lane.stop()
     assert parent.close.call_count == 1
     assert process.kill.call_count == int(alive[0] and alive[1])
 

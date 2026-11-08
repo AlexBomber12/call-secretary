@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from call_secretary import cli, phone
+from call_secretary.audio import AudioError
 from call_secretary.config import ConfigError, IngressRoute
 from call_secretary.health import snapshot
 from call_secretary.isolated_audio import AudioSpec
@@ -278,6 +279,78 @@ def test_fatal_audio_cleanup_failure_keeps_text_job_and_marks_health(settings, m
     asyncio.run(scenario())
 
 
+def test_provider_failure_during_output_write_reopens_audio_for_local_phrase(settings):
+    """Realtime cleanup cancels playback; a cancelled native lane cannot be reused."""
+
+    async def scenario():
+        writing = asyncio.Event()
+        old, new = Endpoint(), Endpoint()
+
+        async def blocked_write(pcm):
+            writing.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                old.closed = True  # AudioLane.exchange kills its lane on cancellation.
+
+        async def old_interrupt():
+            if old.closed:
+                raise AudioError("Audio worker closed")
+
+        old.write, old.interrupt = blocked_write, old_interrupt
+        endpoints = []
+
+        async def open_audio(spec):
+            result = old if not endpoints else new
+            endpoints.append(result)
+            return result
+
+        class Socket:
+            def __init__(self):
+                self.step = 0
+
+            async def send(self, message):
+                pass
+
+            async def recv(self):
+                self.step += 1
+                if self.step == 1:
+                    return json.dumps({"type": "session.updated"})
+                if self.step == 2:
+                    return json.dumps(
+                        {
+                            "type": "response.output_audio.delta",
+                            "item_id": "greeting",
+                            "delta": base64.b64encode(b"\0" * 960).decode(),
+                        }
+                    )
+                await writing.wait()
+                return json.dumps({"type": "error"})
+
+        @asynccontextmanager
+        async def connect(key, model):
+            yield Socket()
+
+        with Store(settings.state_dir) as store:
+            cid = await phone.handle_call(
+                settings,
+                store,
+                OPTIONS,
+                Control(),
+                OBSERVED,
+                b"\1\0" * 960,
+                audio_factory=open_audio,
+                connector=connect,
+            )
+            assert endpoints == [old, new]
+            assert b"".join(new.output) == b"\1\0" * 960
+            assert old.closed and new.closed
+            assert store.call(cid)["status"] == "provider_or_audio_error"
+            assert store.call(cid)["voice_usage_complete"] == 0
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("spoken", [False, True])
 def test_real_at_controller_realtime_and_workers_form_one_offline_phone_journey(
     settings, monkeypatch, spoken
@@ -513,3 +586,43 @@ def test_phone_cli_dispatches_and_hardware_gate_is_not_implicit(settings, monkey
 
     monkeypatch.setattr(phone, "run_phone", run)
     assert cli.main(["phone-run"]) == 0 and called == [settings]
+
+
+def test_invalid_paid_policy_does_not_disable_free_error_reports_or_enrollment(
+    settings, monkeypatch
+):
+    from call_secretary import telegram
+
+    settings = replace(settings, env=settings.env | {"BILLING_REVIEWED_ON": ""})
+    monkeypatch.setattr(cli.Settings, "load", lambda *args: settings)
+
+    class Client(CapturedTelegram):
+        def __init__(self, token):
+            super().__init__()
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    clients = []
+
+    def client(token):
+        value = Client(token)
+        clients.append(value)
+        return value
+
+    async def workers(store, family, api, summary):
+        assert summary.provider is None and summary.rates is None
+        enrollment = Enrollment(store, family)
+        enrollment.claim(enrollment.invite("member_a"), "101")
+        cid = store.create_call("synthetic")
+        store.route_call(cid, "member_a", "caller_selected")
+        store.end_call(cid, "provider_or_audio_error", voice_usage_complete=True)
+        assert await summary.process_one()
+        assert await DeliveryWorker(store, family, api).process_one()
+        assert len(api.receipts) == 1 and cid in api.receipts[0]["text"]
+
+    monkeypatch.setattr(telegram, "TelegramClient", client)
+    monkeypatch.setattr(telegram, "run_workers", workers)
+    assert cli.main(["worker"]) == 0
+    assert clients[0].closed

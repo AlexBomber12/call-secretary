@@ -102,6 +102,7 @@ class AudioLane:
         )
         self.lock = asyncio.Lock()
         self.closed = False
+        self.unreaped = False
         try:
             self.process.start()
         except Exception:
@@ -137,8 +138,11 @@ class AudioLane:
                 raise
 
     def stop(self) -> None:
+        if self.unreaped:
+            raise AudioError("Audio worker remains unreaped; supervisor must restart service")
         if not self.closed:
             self.closed = True
+            self.unreaped = True
             self.pipe.close()
             if self.process.is_alive():
                 self.process.terminate()
@@ -151,6 +155,7 @@ class AudioLane:
                     "Audio process could not be reaped; supervisor must restart service"
                 )
             self.process.close()
+            self.unreaped = False
 
 
 class IsolatedAudio:
