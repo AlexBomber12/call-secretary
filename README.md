@@ -39,6 +39,7 @@ The target hardware is an original Waveshare SIM7600E-H 4G DONGLE. Voice service
 
 ## Documents
 
+- [Contributor workflow, CI and review rules](AGENTS.md)
 - [Development and offline checks](docs/development.md)
 - [Implementation status](docs/progress.md)
 - [Operator next steps (Russian)](docs/operator-next-steps.md)

@@ -136,6 +136,7 @@ class Realtime:
         self._finish_task: asyncio.Task[None] | None = None
         self.input_bytes = 0
         self.closing = False
+        self.cleanup_timeout = 2.0
 
     async def send(self, event: dict[str, Any]) -> None:
         await self.socket.send(json.dumps(event, ensure_ascii=False))
@@ -366,4 +367,7 @@ class Realtime:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            await self.endpoint.interrupt()
+            try:
+                await asyncio.wait_for(self.endpoint.interrupt(), timeout=self.cleanup_timeout)
+            except TimeoutError:
+                raise VoiceError("Audio cleanup timed out") from None

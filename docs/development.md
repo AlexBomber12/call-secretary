@@ -10,12 +10,14 @@ python -m pip install -r requirements.lock
 python -m pip install --no-deps -e .
 call-secretary --profiles config/family.example.yaml check-config
 call-secretary --profiles config/family.example.yaml simulate --recipient member_b --show-report
-python -m pytest -q
-python -m ruff check .
-python -m ruff format --check .
-python -m mypy
+python scripts/ci.py
+# Equivalent on Linux/Git Bash: bash scripts/ci.sh
 ```
 
 The example uses synthetic profiles and has no Telegram destinations. Runtime configuration is `config/family.yaml`, ignored by Git; credentials belong in a private `.env` or process environment. `check-config --live` checks required voice settings without making a request. `--modem` additionally checks phone-service configuration; configuration validity alone does not prove hardware readiness.
 
 Never put real transcripts, caller data, audio, keys or bot invitation links into a public issue, PR, test fixture or CI log. A clean install and automated tests use synthetic data and fake transports only. Live acceptance is recorded separately from unit/integration test results.
+
+The complete gate runs Ruff lint/format, strict mypy, pytest with **100% line and branch coverage across every production Python module**, and offline configuration validation. GitHub Actions runs the same gate on Windows and Linux. Audio, serial, WebSocket and HTTP paths are exercised with isolated fakes; no tests answer calls, use API credentials or send messages.
+
+Follow the root [AGENTS.md](../AGENTS.md), adapted from Almost Reasonable and Infrastructure Inspector. After publication, inspect Actions and Codex Review for the current PR HEAD, fix actionable P1/P2 feedback on the same branch, and repeat validation after every push. A generic completed status is not review approval. Merging requires human authorization; there is no automatic merge daemon.

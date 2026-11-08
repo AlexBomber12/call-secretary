@@ -3,6 +3,7 @@ anyio==4.16.0
 certifi==2026.10.23
 cffi==2.1.1
 colorama==0.4.6
+coverage==7.10.6
 h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
@@ -17,6 +18,7 @@ pycparser==3.12
 Pygments==2.21.0
 pyserial==3.5
 pytest==8.4.1
+pytest-cov==6.2.1
 PyYAML==6.0.2
 ruff==0.12.11
 sounddevice==0.5.3

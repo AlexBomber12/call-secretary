@@ -72,7 +72,8 @@ class TelegramClient:
                 raise TelegramError(0)
             if response.status_code >= 400 or body.get("ok") is not True:
                 code = body.get("error_code", response.status_code)
-                delay = body.get("parameters", {}).get("retry_after", 0)
+                parameters = body.get("parameters")
+                delay = parameters.get("retry_after", 0) if isinstance(parameters, dict) else 0
                 raise TelegramError(
                     code if type(code) is int else 0, delay if type(delay) is int else 0
                 )
@@ -134,6 +135,13 @@ class Enrollment:
         if self.family.profile(profile_id).telegram_chat_id:
             raise ConfigError("Remove the explicit YAML destination before unbinding this profile")
         with self.store.transaction() as db:
+            # Include active calls and jobs whose outbox row does not exist yet.
+            # The marker is checked atomically when a summary creates its report.
+            db.execute(
+                "INSERT OR IGNORE INTO metadata(key,value) "
+                "SELECT 'delivery_revoked:' || id,'1' FROM calls WHERE profile_id=?",
+                (profile_id,),
+            )
             db.execute("DELETE FROM bindings WHERE profile_id=?", (profile_id,))
             db.execute("DELETE FROM invitations WHERE profile_id=?", (profile_id,))
             db.execute(
@@ -155,8 +163,14 @@ class Enrollment:
                         "Destination differs from enrolled chat; explicit unbind required"
                     )
                 db.execute(
-                    "INSERT OR IGNORE INTO bindings VALUES(?,?,?)",
+                    "INSERT INTO bindings VALUES(?,?,?) ON CONFLICT(profile_id) "
+                    "DO UPDATE SET enabled=excluded.enabled",
                     (p.id, p.telegram_chat_id, int(p.enabled)),
+                )
+                db.execute(
+                    "UPDATE outbox SET chat_id=?,state='pending',not_before=0 "
+                    "WHERE profile_id=? AND state='waiting_destination' AND ?=1",
+                    (p.telegram_chat_id, p.id, int(p.enabled)),
                 )
 
 

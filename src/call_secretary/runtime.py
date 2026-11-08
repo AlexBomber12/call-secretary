@@ -34,6 +34,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
             operator_profile=profile_id,
         )
         cid = controller.cid
+        deadline = Deadline(settings.family.max_duration_seconds, started=controller.started)
         endpoint: AudioEndpoint | None = None
         voice: Realtime | None = None
         closer: asyncio.Task[None] | None = None
@@ -56,12 +57,12 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 voice = session
 
                 async def closing() -> None:
-                    await asyncio.sleep(max(1, settings.family.max_duration_seconds - 10))
+                    await asyncio.sleep(max(0, deadline.remaining() - 10))
                     await session.close_soon()
 
                 closer = asyncio.create_task(closing())
                 monitor = asyncio.create_task(controller.monitor(session))
-                await Deadline(settings.family.max_duration_seconds).run(session.run())
+                await deadline.run(session.run())
                 status = (
                     "ended"
                     if session.committed_items <= session.transcribed_items
@@ -80,7 +81,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 await asyncio.gather(monitor, return_exceptions=True)
             if endpoint:
                 try:
-                    await endpoint.close()
+                    await asyncio.wait_for(endpoint.close(), timeout=2)
                 except Exception:
                     status = "audio_error"
             complete = bool(not attempted or (voice and voice.usage_complete and status == "ended"))

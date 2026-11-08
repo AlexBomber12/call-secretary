@@ -10,6 +10,8 @@ Use one dedicated family bot; it can deliver private reports to all enrolled pro
 
 Reports received before enrollment wait for the destination instead of being discarded. A recipient remains fixed in each queued report. `unbind --profile <id>` revokes the binding and blocks unsent old reports; reassignment does not redirect those reports to someone else's chat. Remove any explicit YAML chat ID before unbinding so a restart cannot silently restore it.
 
+Revocation also covers assigned active calls and pending summaries that have not created an outbox entry yet. Durable per-call revocation markers prevent a late summary worker from making an old call deliverable after reassignment. New calls can use the new binding. If a private chat ID is supplied through YAML instead of an invitation, importing it releases matching waiting reports once the profile is enabled; restarting also synchronizes that binding's enablement with YAML.
+
 Transient send errors use persistent backoff and Telegram retry-after. A crash after a successful send but before local acknowledgement can cause a duplicate with the same call ID. Blocked destinations retain their reports for operator review. `backup --destination <new-path>` creates a consistent SQLite copy; treat it as private, like the original state.
 
 Automated tests use a fake Telegram service. Real bot enrollment/delivery has not been performed yet.

@@ -329,6 +329,12 @@ class Store:
                 (cid, content, time.time() if now is None else now),
             )
             if call["profile_id"]:
+                revoked = (
+                    db.execute(
+                        "SELECT 1 FROM metadata WHERE key=?", ("delivery_revoked:" + cid,)
+                    ).fetchone()
+                    is not None
+                )
                 text = str(summary["report"])
                 if not 1 <= len(text) <= 4000:
                     raise StorageError("Report must fit one Telegram message")
@@ -339,9 +345,11 @@ class Store:
                         str(uuid.uuid4()),
                         cid,
                         call["profile_id"],
-                        destination or "",
+                        "" if revoked else (destination or ""),
                         text,
-                        "pending" if destination else "waiting_destination",
+                        "blocked"
+                        if revoked
+                        else ("pending" if destination else "waiting_destination"),
                     ),
                 )
             db.execute(
