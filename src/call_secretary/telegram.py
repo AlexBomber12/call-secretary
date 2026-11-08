@@ -12,6 +12,7 @@ from typing import Any, Protocol
 import httpx
 
 from call_secretary.config import ConfigError, Family, chat_id
+from call_secretary.http_io import json_body
 from call_secretary.storage import Store
 
 
@@ -62,12 +63,11 @@ class TelegramClient:
         if method not in {"getMe", "getUpdates", "sendMessage", "getWebhookInfo"}:
             raise TelegramError(400)
         try:
-            response = await self._http.post(
-                f"https://api.telegram.org/bot{self._token}/{method}", json=payload
-            )
-            if len(response.content) > 524288:
-                raise TelegramError(0)
-            body = response.json()
+            async with asyncio.timeout(30):
+                async with self._http.stream(
+                    "POST", f"https://api.telegram.org/bot{self._token}/{method}", json=payload
+                ) as response:
+                    body = await json_body(response, 524288)
             if not isinstance(body, dict):
                 raise TelegramError(0)
             if response.status_code >= 400 or body.get("ok") is not True:
@@ -78,7 +78,7 @@ class TelegramClient:
                     code if type(code) is int else 0, delay if type(delay) is int else 0
                 )
             return body.get("result")
-        except (httpx.HTTPError, ValueError, TypeError):
+        except (httpx.HTTPError, ValueError, TypeError, TimeoutError):
             raise TelegramError(0) from None
 
 
@@ -200,14 +200,16 @@ class DeliveryWorker:
             binding = db.execute(
                 "SELECT * FROM bindings WHERE profile_id=?", (profile.id,)
             ).fetchone()
-        allowed = bool(
-            profile.enabled
-            and binding
-            and binding["enabled"]
-            and binding["chat_id"] == row["chat_id"]
-        )
-        if not allowed:
+        if not binding or binding["chat_id"] != row["chat_id"]:
             self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
+            return True
+        if not profile.enabled or not binding["enabled"]:
+            with self.store.transaction() as db:
+                db.execute(
+                    "UPDATE outbox SET state='waiting_destination',lease_token=NULL,lease_until=0 "
+                    "WHERE id=? AND lease_token=?",
+                    (oid, token),
+                )
             return True
         try:
             await self.api.request("sendMessage", {"chat_id": row["chat_id"], "text": row["text"]})

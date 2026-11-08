@@ -10,7 +10,7 @@ from call_secretary import locking, modem
 from call_secretary.modem import ModemError
 
 
-@pytest.mark.parametrize("response", [b"ERROR", b"+CME ERROR: 10", b"x" * 16385])
+@pytest.mark.parametrize("response", [b"ERROR\r\n", b"+CME ERROR: 10\r\n", b"x" * 16385])
 def test_bad_modem_responses_are_bounded(response):
     with pytest.raises(ModemError):
         modem.at_query(Port([response]), "AT")

@@ -44,6 +44,9 @@ def test_cli_enrollment_revocation_backup_and_reconciliation(command, settings, 
         from decimal import Decimal
 
         Ledger(store, settings.family.monthly_budget_eur).reserve(cid, Decimal(1))
+        store.end_call(cid)
+        job = store.claim_job("summary_jobs")
+        store.complete_summary(cid, job["lease_token"], {"report": "synthetic final report"}, None)
     assert command("budget-reconcile", "--call-id", cid, "--amount-eur", "0.25") == 0
     with Store(settings.state_dir) as store:
         assert Ledger(store, settings.family.monthly_budget_eur).status()["accounted_eur"] == "0.25"
