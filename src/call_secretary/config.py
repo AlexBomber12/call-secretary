@@ -198,7 +198,8 @@ def load_env(path: Path) -> dict[str, str]:
                 values[key.strip()] = value.strip().strip("\"'")
         except (OSError, UnicodeError):
             raise ConfigError("Cannot read env file") from None
-    return values | dict(os.environ)
+    # Explicit project values, including blank keys, win over global credentials.
+    return dict(os.environ) | values
 
 
 @dataclass(frozen=True)
@@ -208,9 +209,36 @@ class Settings:
     env: dict[str, str] = field(repr=False)
 
     @classmethod
-    def load(cls, profiles: Path, env_file: Path = Path(".env")) -> Settings:
+    def load(cls, profiles: Path | None, env_file: Path = Path(".env")) -> Settings:
         env = load_env(env_file)
-        return cls(load_family(profiles), Path(env.get("STATE_DIR", "./data")), env)
+        family = load_family(profiles or Path(env.get("PROFILES_CONFIG", "config/family.yaml")))
+        expected = {
+            "CALL_MAX_DURATION_SECONDS": str(family.max_duration_seconds),
+            "MONTHLY_API_BUDGET_EUR": str(family.monthly_budget_eur),
+            "BUDGET_TIMEZONE": family.timezone,
+            "TEXT_RETENTION_DAYS": "0",
+            "AUDIO_RECORDING_ENABLED": "false",
+            "GREETING_LANGUAGE": "it",
+        }
+        for key, wanted in expected.items():
+            if not env.get(key):
+                continue
+            if key in {
+                "CALL_MAX_DURATION_SECONDS",
+                "MONTHLY_API_BUDGET_EUR",
+                "TEXT_RETENTION_DAYS",
+            }:
+                try:
+                    equal = Decimal(env[key]).is_finite() and Decimal(env[key]) == Decimal(wanted)
+                except InvalidOperation:
+                    equal = False
+            else:
+                equal = env[key].lower() == wanted.lower()
+            if not equal:
+                raise ConfigError(
+                    f"{key} conflicts with the profiles file; keep one consistent policy"
+                )
+        return cls(family, Path(env.get("STATE_DIR", "./data")), env)
 
     def require(self, *keys: str) -> None:
         missing = [k for k in keys if not self.env.get(k)]
@@ -219,9 +247,12 @@ class Settings:
 
     def validate_live(self, *, modem: bool = False) -> None:
         self.require("OPENAI_API_KEY", "REALTIME_MODEL", "REALTIME_VOICE")
+        from call_secretary.budget import RateCard
+
+        RateCard.load(self.env)
         if self.env.get("AUDIO_RECORDING_ENABLED", "false").lower() != "false":
             raise ConfigError("Audio recording must be disabled")
         if modem:
             self.require("TELEGRAM_BOT_TOKEN", "MODEM_CONTROL_DEVICE", "MODEM_AUDIO_DEVICE")
-            if not all(p.enabled and p.telegram_chat_id for p in self.family.profiles):
-                raise ConfigError("Enable and enroll every configured profile before phone service")
+            if not all(p.enabled for p in self.family.profiles):
+                raise ConfigError("Enable every configured profile before phone service")

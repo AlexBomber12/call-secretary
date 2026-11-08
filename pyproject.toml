@@ -15,7 +15,10 @@ dependencies = [
 [project.optional-dependencies]
 audio = ["sounddevice==0.5.3"]
 modem = ["pyserial==3.5"]
-dev = ["pytest==8.4.1", "ruff==0.12.11", "mypy==1.17.1"]
+dev = [
+  "pytest==8.4.1", "pytest-cov==6.2.1", "coverage==7.10.6",
+  "ruff==0.12.11", "mypy==1.17.1",
+]
 
 [project.scripts]
 call-secretary = "call_secretary.cli:main"
@@ -26,6 +29,16 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+branch = true
+source = ["src/call_secretary"]
+relative_files = true
+
+[tool.coverage.report]
+fail_under = 100
+precision = 2
+show_missing = true
 
 [tool.ruff]
 line-length = 100

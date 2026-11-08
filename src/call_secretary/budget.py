@@ -145,6 +145,7 @@ class RateCard:
     context_tokens: int = 4096
     # Upper accounting allowance, not a quoted transcription tariff.
     transcription_usd_per_minute: Decimal = Decimal("0.05")
+    reviewed_on: date | None = None
 
     @classmethod
     def load(cls, env: dict[str, str], *, today: date | None = None) -> RateCard:
@@ -167,7 +168,14 @@ class RateCard:
         if model not in prices:
             raise ConfigError("Realtime model needs an explicitly reviewed rate card")
         audio_in, audio_out, text_in, text_out = (Decimal(n) for n in prices[model])
-        return cls(model, fx, audio_in, audio_out, text_in, text_out)
+        return cls(model, fx, audio_in, audio_out, text_in, text_out, reviewed_on=reviewed)
+
+    def assert_current(self) -> None:
+        if (
+            self.reviewed_on is None
+            or not 0 <= (datetime.now(UTC).date() - self.reviewed_on).days <= 30
+        ):
+            raise ConfigError("Billing review is required before another paid request")
 
     def reservation(self, prompt_bytes: int, seconds: int) -> Decimal:
         # A token cannot encode less than a UTF-8 byte; include protocol/tool margin.

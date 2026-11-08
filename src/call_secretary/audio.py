@@ -31,15 +31,26 @@ class Microphone:
         import sounddevice as sd
 
         self._lock = threading.RLock()
-        self._input: Any = sd.RawInputStream(
-            samplerate=RATE, channels=1, dtype="int16", device=input_device, blocksize=480
-        )
-        self._output: Any = sd.RawOutputStream(
-            samplerate=RATE, channels=1, dtype="int16", device=output_device, blocksize=480
-        )
-        self._input.start()
-        self._output.start()
-        self.latency_ms = int(float(self._output.latency) * 1000)
+        self._input: Any = None
+        self._output: Any = None
+        try:
+            self._input = sd.RawInputStream(
+                samplerate=RATE, channels=1, dtype="int16", device=input_device, blocksize=480
+            )
+            self._output = sd.RawOutputStream(
+                samplerate=RATE, channels=1, dtype="int16", device=output_device, blocksize=480
+            )
+            self._input.start()
+            self._output.start()
+            self.latency_ms = int(float(self._output.latency) * 1000)
+        except Exception:
+            for stream in (self._output, self._input):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            raise AudioError("Cannot open microphone and speaker") from None
 
     async def read(self) -> bytes:
         data, overflow = await asyncio.to_thread(self._input.read, 480)

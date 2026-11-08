@@ -20,7 +20,10 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
     if not any(p.enabled for p in settings.family.profiles):
         raise ConfigError("Enable a profile before microphone testing")
     router = Router(settings.family)
-    with Store(settings.state_dir) as store, InstanceLock(store.path.parent / "runtime.lock"):
+    with (
+        Store(settings.state_dir, mode="live") as store,
+        InstanceLock(store.path.parent / "runtime.lock"),
+    ):
         store.recover_calls()
         controller = CallController(
             store,
@@ -31,6 +34,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
             operator_profile=profile_id,
         )
         cid = controller.cid
+        deadline = Deadline(settings.family.max_duration_seconds, started=controller.started)
         endpoint: AudioEndpoint | None = None
         voice: Realtime | None = None
         closer: asyncio.Task[None] | None = None
@@ -53,13 +57,17 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 voice = session
 
                 async def closing() -> None:
-                    await asyncio.sleep(max(1, settings.family.max_duration_seconds - 10))
+                    await asyncio.sleep(max(0, deadline.remaining() - 10))
                     await session.close_soon()
 
                 closer = asyncio.create_task(closing())
                 monitor = asyncio.create_task(controller.monitor(session))
-                await Deadline(settings.family.max_duration_seconds).run(session.run())
-                status = "ended"
+                await deadline.run(session.run())
+                status = (
+                    "ended"
+                    if session.committed_items <= session.transcribed_items
+                    else "ended_text_incomplete"
+                )
         except TimeoutError:
             status = "duration_limit"
         except Exception:
@@ -73,7 +81,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 await asyncio.gather(monitor, return_exceptions=True)
             if endpoint:
                 try:
-                    await endpoint.close()
+                    await asyncio.wait_for(endpoint.close(), timeout=2)
                 except Exception:
                     status = "audio_error"
             complete = bool(not attempted or (voice and voice.usage_complete and status == "ended"))
@@ -88,6 +96,6 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                     controller.ledger.consume(cid, f"{cid}:transcription_allowance", allowance)
             finally:
                 controller.finish(status, usage_complete=complete)
-        if status not in {"ended", "duration_limit"}:
+        if status not in {"ended", "ended_text_incomplete", "duration_limit"}:
             raise VoiceError("Voice prototype interrupted; pending state retained")
         return cid

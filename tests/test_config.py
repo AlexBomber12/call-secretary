@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from call_secretary.cli import main
-from call_secretary.config import ConfigError, Settings, load_family
+from call_secretary.config import ConfigError, Settings, load_env, load_family
 
 EXAMPLE = Path("config/family.example.yaml")
 
@@ -49,3 +49,28 @@ def test_live_mode_requires_credentials_and_does_not_expose_values():
     with pytest.raises(ConfigError) as err:
         settings.validate_live()
     assert "private-test-token" not in str(err.value)
+
+
+def test_env_cannot_silently_override_family_spending_or_duration(tmp_path):
+    env = tmp_path / "private.env"
+    env.write_text("MONTHLY_API_BUDGET_EUR=500\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="conflicts"):
+        Settings.load(EXAMPLE, env)
+
+
+def test_explicit_blank_project_key_does_not_inherit_another_global_project_key(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-global-key")
+    env = tmp_path / "private.env"
+    env.write_text("OPENAI_API_KEY=\n", encoding="utf-8")
+    assert load_env(env)["OPENAI_API_KEY"] == ""
+
+
+def test_numeric_policy_formatting_is_not_a_conflict(tmp_path):
+    env = tmp_path / "private.env"
+    env.write_text(
+        "MONTHLY_API_BUDGET_EUR=50.00\nPROFILES_CONFIG=config/family.example.yaml\n",
+        encoding="utf-8",
+    )
+    assert Settings.load(None, env).family.monthly_budget_eur == 50

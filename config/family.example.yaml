@@ -1,4 +1,4 @@
-# Proposed schema only; the application has not been implemented yet.
+# Validated configuration schema for the software prototype.
 # Copy to ignored config/family.yaml and fill in private settings before deployment.
 # All values below are synthetic. Never commit the real family configuration.
 schema_version: 1

@@ -2,7 +2,15 @@
 
 Self-hosted family voice secretary for calls forwarded to dedicated mobile SIM/USB modem endpoints. It takes a message in the caller's language and sends a private Telegram summary to the selected family member.
 
-**Status: implementation in progress. Configuration and the CLI are available; live calling and deployment are not validated yet.**
+**Status: the software prototype is implemented. Offline family-call simulation, private history/queues, voice API and Telegram adapters are available. Real API/audio/Telegram acceptance and modem integration/deployment are still pending.**
+
+After the [development install](docs/development.md), try the complete offline scenario:
+
+```sh
+call-secretary --profiles config/family.example.yaml simulate --recipient member_b --show-report
+```
+
+This makes no network requests: it uses a scripted transcript, an explicitly labelled original-text fallback and captured Telegram deliveries in a separate simulation database. It does not demonstrate live speech recognition or translation.
 
 ```text
 Family mobile numbers -- busy / no answer --> SIM + USB modem
@@ -31,13 +39,18 @@ The target hardware is an original Waveshare SIM7600E-H 4G DONGLE. Voice service
 
 ## Documents
 
+- [Contributor workflow, CI and review rules](AGENTS.md)
 - [Development and offline checks](docs/development.md)
+- [Implementation status](docs/progress.md)
+- [Operator next steps (Russian)](docs/operator-next-steps.md)
+- [Voice prototype](docs/voice-prototype.md)
+- [Telegram enrollment and delivery](docs/telegram-setup.md)
 - [Goal and specification (Russian)](docs/spec.md)
 - [Implementation plan (Russian)](docs/plan.md)
 - [Planned PR scope and acceptance criteria (Russian)](docs/pr-breakdown.md)
 - [Architecture and hardware acceptance](docs/architecture.md)
 - [Family routing and private reports (Russian)](docs/family-routing.md)
 - [Synthetic family configuration](config/family.example.yaml)
-- [Configuration template](.env.example) — proposed settings; no executable currently reads them.
+- [Configuration template](.env.example) — copy to a private `.env`; never commit credentials.
 
 Production credentials, phone numbers, transcripts and host configuration stay outside this public repository. Public visibility does not select an open-source license; licensing is still to be decided.

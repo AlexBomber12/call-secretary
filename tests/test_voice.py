@@ -7,7 +7,7 @@ import pytest
 
 from call_secretary.audio import AudioError, Playback
 from call_secretary.budget import RateCard
-from call_secretary.voice import Realtime, ToolReply, session_update
+from call_secretary.voice import Realtime, ToolReply, VoiceError, session_update
 
 
 class Endpoint:
@@ -168,5 +168,31 @@ def test_cancelled_partial_function_is_not_executed_or_parsed():
             }
         )
         assert len(hooks.usages) == 1
+
+    asyncio.run(scenario())
+
+
+def test_shutdown_does_not_wait_forever_for_unresponsive_audio_cleanup():
+    class HandshakeSocket(Socket):
+        def __init__(self):
+            super().__init__()
+            self.initial = True
+
+        async def recv(self):
+            if self.initial:
+                self.initial = False
+                return json.dumps({"type": "session.updated"})
+            await asyncio.Event().wait()
+
+    class StuckCleanup(Endpoint):
+        async def interrupt(self):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        voice = Realtime(HandshakeSocket(), StuckCleanup(), Hooks(), rates(), "prompt", [], "marin")
+        voice.cleanup_timeout = 0.02
+        voice.finish_event.set()
+        with pytest.raises(VoiceError, match="cleanup timed out"):
+            await asyncio.wait_for(voice.run(), 0.5)
 
     asyncio.run(scenario())

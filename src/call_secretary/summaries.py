@@ -157,7 +157,43 @@ def render(
         and "summary_unavailable_original_text" not in summary["uncertainties"]
     ):
         lines.append("? " + "; ".join(summary["uncertainties"])[:600])
-    lines.extend([f"{labels[13]}: {call['status']}", f"ID: {call['id']}"])
+    states = {
+        "ru": {
+            "ended": "завершён",
+            "interrupted": "прерван",
+            "duration_limit": "лимит времени",
+            "recipient_timeout": "адресат не определён",
+            "silence_timeout": "длительная тишина",
+            "budget_refused": "лимит расходов",
+            "ended_text_incomplete": "часть текста не распознана",
+            "provider_or_audio_error": "сбой голосовой связи",
+            "audio_error": "сбой звука",
+            "unassigned": "адресат не определён",
+        },
+        "it": {
+            "ended": "conclusa",
+            "interrupted": "interrotta",
+            "duration_limit": "limite di durata",
+            "recipient_timeout": "destinatario non identificato",
+            "silence_timeout": "silenzio",
+            "budget_refused": "limite di spesa",
+            "ended_text_incomplete": "trascrizione incompleta",
+        },
+        "en": {
+            "ended": "completed",
+            "interrupted": "interrupted",
+            "duration_limit": "duration limit",
+            "recipient_timeout": "recipient unresolved",
+            "silence_timeout": "silence",
+            "budget_refused": "spending limit",
+            "ended_text_incomplete": "incomplete transcript",
+        },
+    }
+    status = states[lang].get(
+        call["status"],
+        {"ru": "сбой связи", "it": "problema di connessione", "en": "connection issue"}[lang],
+    )
+    lines.extend([f"{labels[13]}: {status}", f"ID: {call['id']}"])
     # Preserve the stable ID even when the provider returned very verbose fields.
     body = "\n".join(lines[:-1])
     return body[:3850] + "\n" + lines[-1]
@@ -271,6 +307,7 @@ class SummaryWorker:
                 and profile
                 and any(r["role"] == "caller" for r in transcript)
             ):
+                self.rates.assert_current()
                 self.ledger.reserve(cid, self.rates.summary_reservation(), horizon_seconds=60)
                 payload = {"call_status": call["status"], "utterances": transcript}
                 encoded = json.dumps(payload, ensure_ascii=False)

@@ -70,7 +70,7 @@ COMMIT;
 
 
 class Store:
-    def __init__(self, directory: Path):
+    def __init__(self, directory: Path, *, mode: str | None = None):
         directory = directory.absolute()
         if directory.is_symlink():
             raise StorageError("State directory must not be a symlink")
@@ -104,6 +104,29 @@ class Store:
         elif version != 1:
             self.db.close()
             raise StorageError("Unsupported database schema")
+        if mode is not None:
+            try:
+                self.assert_mode(mode)
+            except BaseException:
+                self.db.close()
+                raise
+
+    def assert_mode(self, mode: str) -> None:
+        if mode not in {"live", "simulation"}:
+            raise StorageError("Unknown state mode")
+        with self.transaction() as db:
+            old = db.execute("SELECT value FROM metadata WHERE key='state_mode'").fetchone()
+            if old and old[0] != mode:
+                raise StorageError("Live and simulation state must use different directories")
+            if not old:
+                simulated = db.execute(
+                    "SELECT 1 FROM calls WHERE ingress_id='simulation'"
+                ).fetchone()
+                real = db.execute("SELECT 1 FROM calls WHERE ingress_id!='simulation'").fetchone()
+                bindings = db.execute("SELECT 1 FROM bindings").fetchone()
+                if (mode == "live" and simulated) or (mode == "simulation" and (real or bindings)):
+                    raise StorageError("Existing state cannot be assigned this mode")
+                db.execute("INSERT INTO metadata VALUES('state_mode',?)", (mode,))
 
     def close(self) -> None:
         self.db.close()
@@ -306,6 +329,12 @@ class Store:
                 (cid, content, time.time() if now is None else now),
             )
             if call["profile_id"]:
+                revoked = (
+                    db.execute(
+                        "SELECT 1 FROM metadata WHERE key=?", ("delivery_revoked:" + cid,)
+                    ).fetchone()
+                    is not None
+                )
                 text = str(summary["report"])
                 if not 1 <= len(text) <= 4000:
                     raise StorageError("Report must fit one Telegram message")
@@ -316,9 +345,11 @@ class Store:
                         str(uuid.uuid4()),
                         cid,
                         call["profile_id"],
-                        destination or "",
+                        "" if revoked else (destination or ""),
                         text,
-                        "pending" if destination else "waiting_destination",
+                        "blocked"
+                        if revoked
+                        else ("pending" if destination else "waiting_destination"),
                     ),
                 )
             db.execute(
