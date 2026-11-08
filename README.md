@@ -2,7 +2,7 @@
 
 Self-hosted family voice secretary for calls forwarded to dedicated mobile SIM/USB modem endpoints. It takes a message in the caller's language and sends a private Telegram summary to the selected family member.
 
-**Status: project specification. The application is not implemented or deployed yet.**
+**Status: implementation in progress. Configuration and the CLI are available; live calling and deployment are not validated yet.**
 
 ```text
 Family mobile numbers -- busy / no answer --> SIM + USB modem
@@ -31,6 +31,7 @@ The target hardware is an original Waveshare SIM7600E-H 4G DONGLE. Voice service
 
 ## Documents
 
+- [Development and offline checks](docs/development.md)
 - [Goal and specification (Russian)](docs/spec.md)
 - [Implementation plan (Russian)](docs/plan.md)
 - [Planned PR scope and acceptance criteria (Russian)](docs/pr-breakdown.md)
