@@ -20,7 +20,10 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
     if not any(p.enabled for p in settings.family.profiles):
         raise ConfigError("Enable a profile before microphone testing")
     router = Router(settings.family)
-    with Store(settings.state_dir) as store, InstanceLock(store.path.parent / "runtime.lock"):
+    with (
+        Store(settings.state_dir, mode="live") as store,
+        InstanceLock(store.path.parent / "runtime.lock"),
+    ):
         store.recover_calls()
         controller = CallController(
             store,
@@ -59,7 +62,11 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 closer = asyncio.create_task(closing())
                 monitor = asyncio.create_task(controller.monitor(session))
                 await Deadline(settings.family.max_duration_seconds).run(session.run())
-                status = "ended"
+                status = (
+                    "ended"
+                    if session.committed_items <= session.transcribed_items
+                    else "ended_text_incomplete"
+                )
         except TimeoutError:
             status = "duration_limit"
         except Exception:
@@ -88,6 +95,6 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                     controller.ledger.consume(cid, f"{cid}:transcription_allowance", allowance)
             finally:
                 controller.finish(status, usage_complete=complete)
-        if status not in {"ended", "duration_limit"}:
+        if status not in {"ended", "ended_text_incomplete", "duration_limit"}:
             raise VoiceError("Voice prototype interrupted; pending state retained")
         return cid

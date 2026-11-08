@@ -9,6 +9,7 @@ python -m venv .venv
 python -m pip install -r requirements.lock
 python -m pip install --no-deps -e .
 call-secretary --profiles config/family.example.yaml check-config
+call-secretary --profiles config/family.example.yaml simulate --recipient member_b --show-report
 python -m pytest -q
 python -m ruff check .
 python -m ruff format --check .
