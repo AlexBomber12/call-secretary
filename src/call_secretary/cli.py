@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
@@ -19,12 +20,20 @@ def parser() -> argparse.ArgumentParser:
     modem = sub.add_parser("modem-inspect", help="List ports, or inspect one explicit device")
     modem.add_argument("--device")
     sub.add_parser("hardware-checklist", help="Print unverified H1/H2 acceptance checklist")
+    prototype = sub.add_parser("voice-prototype", help="Paid microphone test, no phone modem")
+    prototype.add_argument("--profile", required=True)
+    sub.add_parser("audio-devices", help="List local microphone/speaker devices")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "audio-devices":
+            from call_secretary.audio import devices
+
+            print(devices())
+            return 0
         if args.command in {"modem-inspect", "hardware-checklist"}:
             from call_secretary.modem import hardware_checklist, inspect, inventory
 
@@ -35,6 +44,12 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, ensure_ascii=False))
             return 0
         settings = Settings.load(args.profiles, args.env_file)
+        if args.command == "voice-prototype":
+            from call_secretary.runtime import run_microphone
+
+            cid = asyncio.run(run_microphone(settings, args.profile))
+            print(json.dumps({"call_id": cid, "status": "finished"}))
+            return 0
         if args.command == "check-config" and (args.live or args.modem):
             settings.validate_live(modem=args.modem)
         print(
@@ -53,9 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
-    except (OSError, RuntimeError):
-        print(json.dumps({"error": "Device operation failed; check explicit device and ownership"}))
+    except Exception:
+        print(json.dumps({"error": "Operation failed; check configuration and retained state"}))
         return 2
+    except KeyboardInterrupt:
+        print(json.dumps({"status": "interrupted"}))
+        return 130
 
 
 if __name__ == "__main__":
