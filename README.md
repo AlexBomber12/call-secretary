@@ -33,6 +33,7 @@ The target hardware is an original Waveshare SIM7600E-H 4G DONGLE. Voice service
 
 - [Goal and specification (Russian)](docs/spec.md)
 - [Implementation plan (Russian)](docs/plan.md)
+- [Planned PR scope and acceptance criteria (Russian)](docs/pr-breakdown.md)
 - [Architecture and hardware acceptance](docs/architecture.md)
 - [Family routing and private reports (Russian)](docs/family-routing.md)
 - [Synthetic family configuration](config/family.example.yaml)
