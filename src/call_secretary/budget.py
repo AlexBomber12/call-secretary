@@ -199,6 +199,13 @@ class RateCard:
         total_out = count(usage.get("output_tokens"))
         detail_in = usage.get("input_token_details", {})
         detail_out = usage.get("output_token_details", {})
+        if (
+            not isinstance(detail_in, dict)
+            or not isinstance(detail_out, dict)
+            or "input_token_details" not in usage
+            or "output_token_details" not in usage
+        ):
+            raise BudgetError("Provider usage token details are unavailable")
         audio_in = count(detail_in.get("audio_tokens", 0))
         audio_out = count(detail_out.get("audio_tokens", 0))
         if audio_in > total_in or audio_out > total_out:
