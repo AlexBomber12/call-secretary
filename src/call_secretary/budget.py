@@ -41,7 +41,13 @@ class Ledger:
         return now.astimezone(self.zone).strftime("%Y-%m")
 
     def reserve(
-        self, cid: str, amount: Decimal, *, now: datetime | None = None, horizon_seconds: int = 660
+        self,
+        cid: str,
+        amount: Decimal,
+        *,
+        now: datetime | None = None,
+        horizon_seconds: int = 660,
+        incremental: bool = False,
     ) -> None:
         now = now or datetime.now(UTC)
         months = {self.month(now), self.month(now + timedelta(seconds=horizon_seconds))}
@@ -56,7 +62,10 @@ class Ledger:
                 if current and current["closed"]:
                     raise BudgetError("Settled calls cannot make additional paid requests")
                 previous = max(current["reserved"], current["consumed"]) if current else 0
-                wanted = max(requested, previous)
+                # Follow-up work needs its full allowance above already consumed
+                # usage, including when the provider exceeded the original hold.
+                additional = current["consumed"] if current and incremental else 0
+                wanted = max(requested + additional, previous)
                 total = db.execute(
                     "SELECT COALESCE(SUM(CASE WHEN closed=1 THEN consumed "
                     "ELSE MAX(reserved,consumed) END),0) "

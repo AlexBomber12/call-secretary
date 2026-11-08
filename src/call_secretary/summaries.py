@@ -60,7 +60,8 @@ def fallback(transcript: list[dict[str, Any]]) -> dict[str, Any]:
         **dict.fromkeys(FIELDS),
         "purpose": quoted[:1000] or None,
         "urgency": "unknown",
-        "uncertainties": ["summary_unavailable_original_text"],
+        "uncertainties": ["summary_unavailable_original_text"]
+        + (["transcript_truncated"] if len(quoted) > 1000 else []),
     }
 
 
@@ -139,6 +140,23 @@ def render(
     ]
     if "summary_unavailable_original_text" in summary["uncertainties"]:
         lines.append(labels[11])
+    if "transcript_truncated" in summary["uncertainties"]:
+        lines.append(
+            {
+                "ru": "В отчёте только часть текста; полный распознанный текст сохранён локально.",
+                "it": "Nel rapporto solo parte del testo; la trascrizione è conservata localmente.",
+                "en": "Report includes only part of the text; the transcript is saved locally.",
+            }[lang]
+        )
+    if call["route_source"] == "caller_selected":
+        lines.append(labels[12])
+    uncertainties = [
+        x
+        for x in summary["uncertainties"]
+        if x not in {"summary_unavailable_original_text", "transcript_truncated"}
+    ]
+    if uncertainties:
+        lines.append("? " + "; ".join(uncertainties)[:600])
     values = [
         summary["caller_name"],
         summary["organization"],
@@ -148,17 +166,18 @@ def render(
         summary["next_step"],
         summary["language"],
     ]
-    lines.extend(
-        f"{label}: {str(value)[:1000] if value else unknown}"
-        for label, value in zip(labels[3:10], values, strict=True)
+    # Share the remaining space across all fields so a verbose name/purpose
+    # cannot push the callback or next step out of the recipient's message.
+    field_limit = max(
+        1,
+        (3850 - len("\n".join(lines)) - sum(len(label) + 3 for label in labels[3:10]))
+        // len(values),
     )
-    if call["route_source"] == "caller_selected":
-        lines.append(labels[12])
-    if (
-        summary["uncertainties"]
-        and "summary_unavailable_original_text" not in summary["uncertainties"]
-    ):
-        lines.append("? " + "; ".join(summary["uncertainties"])[:600])
+    display_values = [str(value) if value else unknown for value in values]
+    lines.extend(
+        f"{label}: " + (value[: field_limit - 1] + "…" if len(value) > field_limit else value)
+        for label, value in zip(labels[3:10], display_values, strict=True)
+    )
     states = {
         "ru": {
             "ended": "завершён",
@@ -195,10 +214,9 @@ def render(
         call["status"],
         {"ru": "сбой связи", "it": "problema di connessione", "en": "connection issue"}[lang],
     )
-    lines.extend([f"{labels[13]}: {status}", f"ID: {call['id']}"])
-    # Preserve the stable ID even when the provider returned very verbose fields.
-    body = "\n".join(lines[:-1])
-    return body[:3850] + "\n" + lines[-1]
+    # Warnings precede verbose fields; reserve the footer for status and stable ID.
+    body = "\n".join(lines)
+    return body[:3850] + f"\n{labels[13]}: {status}\nID: {call['id']}"
 
 
 class SummaryProvider(Protocol):
@@ -300,6 +318,10 @@ class SummaryWorker:
                 return True
             transcript = self.store.transcript(cid)
             result = fallback(transcript)
+            payload = {"call_status": call["status"], "utterances": transcript}
+            transcript_truncated = (
+                len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > 48000
+            )
             key = "summary_checkpoint:" + cid
             with self.store.transaction() as db:
                 cached = db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
@@ -318,13 +340,13 @@ class SummaryWorker:
             ):
                 try:
                     self.rates.assert_current()
-                    self.ledger.reserve(cid, self.rates.summary_reservation(), horizon_seconds=60)
+                    self.ledger.reserve(
+                        cid, self.rates.summary_reservation(), horizon_seconds=60, incremental=True
+                    )
                     can_generate = True
                 except (ConfigError, BudgetError):
                     can_generate = False
-                payload = {"call_status": call["status"], "utterances": transcript}
-                encoded = json.dumps(payload, ensure_ascii=False)
-                if len(encoded.encode("utf-8")) > 48000:
+                if transcript_truncated:
                     # Keep the request bounded; explicit marker survives into the report.
                     payload = {
                         "call_status": str(call["status"])[:100],
@@ -383,6 +405,10 @@ class SummaryWorker:
                     result = validate_summary(json.loads(response["text"]))
                 except (ValueError, TypeError, KeyError, BudgetError, SummaryError):
                     result = fallback(transcript)
+            # Derive the warning from retained input even when replaying a
+            # checkpoint. A model omission or a restart cannot erase this fact.
+            if transcript_truncated and "transcript_truncated" not in result["uncertainties"]:
+                result["uncertainties"].append("transcript_truncated")
             report = render(call, profile, result, self.family.timezone)
             self.store.complete_summary(
                 cid,
