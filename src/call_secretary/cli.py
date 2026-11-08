@@ -16,12 +16,24 @@ def parser() -> argparse.ArgumentParser:
     check.add_argument("--live", action="store_true")
     check.add_argument("--modem", action="store_true")
     sub.add_parser("status", help="Show readiness, never secrets or transcript contents")
+    modem = sub.add_parser("modem-inspect", help="List ports, or inspect one explicit device")
+    modem.add_argument("--device")
+    sub.add_parser("hardware-checklist", help="Print unverified H1/H2 acceptance checklist")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command in {"modem-inspect", "hardware-checklist"}:
+            from call_secretary.modem import hardware_checklist, inspect, inventory
+
+            if args.command == "hardware-checklist":
+                result = hardware_checklist()
+            else:
+                result = inspect(args.device) if args.device else {"ports": inventory()}
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         settings = Settings.load(args.profiles, args.env_file)
         if args.command == "check-config" and (args.live or args.modem):
             settings.validate_live(modem=args.modem)
@@ -40,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except ConfigError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+        return 2
+    except (OSError, RuntimeError):
+        print(json.dumps({"error": "Device operation failed; check explicit device and ownership"}))
         return 2
 
 
