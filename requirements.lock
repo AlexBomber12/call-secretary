@@ -1,0 +1,25 @@
+# Python 3.12; runtime, audio, modem and developer dependencies.
+anyio==4.16.0
+certifi==2026.10.23
+cffi==2.1.1
+colorama==0.4.6
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+mypy==1.17.1
+mypy_extensions==1.2.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.7.0
+pycparser==3.12
+Pygments==2.21.0
+pyserial==3.5
+pytest==8.4.1
+PyYAML==6.0.2
+ruff==0.12.11
+sounddevice==0.5.3
+typing_extensions==4.16.0
+tzdata==2025.2
+websockets==15.0.1
