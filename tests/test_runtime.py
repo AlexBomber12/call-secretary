@@ -6,6 +6,7 @@ import pytest
 from test_voice import Endpoint
 
 from call_secretary import runtime
+from call_secretary.audio import FatalAudioError
 from call_secretary.config import ConfigError
 from call_secretary.storage import Store
 from call_secretary.voice import VoiceError
@@ -21,6 +22,8 @@ from call_secretary.voice import VoiceError
         ("open", "provider_or_audio_error", True),
         ("close", "audio_error", False),
         ("connect", "provider_or_audio_error", False),
+        ("fatal_open", "audio_error", True),
+        ("fatal_close", "audio_error", False),
     ],
 )
 def test_runtime_persists_final_state_and_keeps_unknown_cost(
@@ -31,11 +34,15 @@ def test_runtime_persists_final_state_and_keeps_unknown_cost(
     class Audio(Endpoint):
         def __init__(self):
             super().__init__()
+            if outcome == "fatal_open":
+                raise FatalAudioError("synthetic unreaped startup worker")
             if outcome == "open":
                 raise RuntimeError("synthetic unavailable microphone")
             endpoints.append(self)
 
         async def close(self):
+            if outcome == "fatal_close":
+                raise FatalAudioError("synthetic unreaped cleanup worker")
             if outcome == "close":
                 raise RuntimeError("synthetic close failure")
 
@@ -81,7 +88,10 @@ def test_runtime_persists_final_state_and_keeps_unknown_cost(
     monkeypatch.setattr(runtime, "connect_api", connect)
     monkeypatch.setattr(runtime, "Realtime", Session)
     monkeypatch.setattr(runtime, "Deadline", Timer)
-    if expected in {"provider_or_audio_error", "audio_error"}:
+    if outcome in {"fatal_open", "fatal_close"}:
+        with pytest.raises(FatalAudioError):
+            asyncio.run(runtime.run_microphone(settings, "member_a"))
+    elif expected in {"provider_or_audio_error", "audio_error"}:
         with pytest.raises(VoiceError, match="pending state retained"):
             asyncio.run(runtime.run_microphone(settings, "member_a"))
     else:

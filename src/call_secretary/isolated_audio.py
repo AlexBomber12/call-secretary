@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from typing import Any
 
-from call_secretary.audio import RATE, AudioError
+from call_secretary.audio import RATE, AudioError, FatalAudioError
 
 
 @dataclass(frozen=True)
@@ -139,7 +139,7 @@ class AudioLane:
 
     def stop(self) -> None:
         if self.unreaped:
-            raise AudioError("Audio worker remains unreaped; supervisor must restart service")
+            raise FatalAudioError("Audio worker remains unreaped; supervisor must restart service")
         if not self.closed:
             self.closed = True
             self.unreaped = True
@@ -151,7 +151,7 @@ class AudioLane:
                     self.process.kill()
             self.process.join(0.3)
             if self.process.is_alive():
-                raise AudioError(
+                raise FatalAudioError(
                     "Audio process could not be reaped; supervisor must restart service"
                 )
             self.process.close()
@@ -198,4 +198,4 @@ class IsolatedAudio:
             except Exception as exc:
                 errors.append(exc)
         if errors:
-            raise AudioError("Audio workers could not be stopped")
+            raise FatalAudioError("Audio workers could not be stopped")

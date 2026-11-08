@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from call_secretary import health
-from call_secretary.audio import FRAME_BYTES, AudioEndpoint
+from call_secretary.audio import FRAME_BYTES, AudioEndpoint, FatalAudioError
 from call_secretary.budget import BudgetError, RateCard
 from call_secretary.calls import CallController
 from call_secretary.config import ConfigError, Settings
@@ -78,7 +78,10 @@ async def race_call(operation: Coroutine[Any, Any, None], watch: Coroutine[Any, 
     finally:
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, FatalAudioError):
+                raise result  # Fatal cleanup outranks caller/USB completion.
 
 
 async def handle_call(
@@ -167,6 +170,8 @@ async def handle_call(
                     closer.cancel()
                     monitor.cancel()
                     await asyncio.gather(closer, monitor, return_exceptions=True)
+        except FatalAudioError:
+            raise  # Never recover while a native worker may still own hardware.
         except Exception as exc:
             status = "budget_refused" if isinstance(exc, BudgetError) else "provider_or_audio_error"
             health.update(store, "voice", "unavailable")
@@ -188,6 +193,9 @@ async def handle_call(
                 status = "caller_hangup"
     except TimeoutError:
         status = "duration_limit"
+    except FatalAudioError:
+        status = "audio_error"
+        raise
     except Exception:
         status = "provider_or_audio_error"
     finally:
@@ -217,7 +225,11 @@ async def handle_call(
                     voice and voice.usage_complete and status == "ended"
                 )
                 call.finish(status, usage_complete=complete)
-                health.update(store, "audio", "idle" if audio_ok else "unavailable")
+                health.update(
+                    store,
+                    "audio",
+                    "idle" if audio_ok and status != "audio_error" else "unavailable",
+                )
                 if status in {"ended", "ended_text_incomplete", "caller_hangup", "duration_limit"}:
                     health.update(store, "voice", "idle")
     return call.cid
@@ -242,6 +254,7 @@ async def run_phone(settings: Settings) -> None:
             store.recover_calls()
             while not stop.is_set():
                 control = None
+                fatal_error = None
                 try:
                     health.update(store, "modem", "starting")
                     control = await asyncio.to_thread(open_control, options.device)
@@ -266,11 +279,19 @@ async def run_phone(settings: Settings) -> None:
                             finally:
                                 task.cancel()
                                 stopping.cancel()
-                                await asyncio.gather(task, stopping, return_exceptions=True)
+                                results = await asyncio.gather(
+                                    task, stopping, return_exceptions=True
+                                )
+                                for result in results:
+                                    if isinstance(result, FatalAudioError):
+                                        raise result
                         try:
                             await asyncio.wait_for(stop.wait(), timeout=0.5)
                         except TimeoutError:
                             pass
+                except FatalAudioError as exc:
+                    fatal_error = exc
+                    raise
                 except ModemError:
                     health.update(store, "modem", "unavailable")
                     try:
@@ -279,7 +300,13 @@ async def run_phone(settings: Settings) -> None:
                         pass
                 finally:
                     if control:
-                        await asyncio.to_thread(control.channel.close)
+                        try:
+                            await asyncio.to_thread(control.channel.close)
+                        except ModemError:
+                            health.update(store, "modem", "unavailable")
+                            if fatal_error is not None:
+                                raise fatal_error from None
+                            raise
             for component in ("modem", "audio", "voice"):
                 health.update(store, component, "stopped")
     finally:

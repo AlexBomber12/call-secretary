@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from call_secretary import cli, phone
-from call_secretary.audio import AudioError
+from call_secretary.audio import AudioError, FatalAudioError
 from call_secretary.config import ConfigError, IngressRoute
 from call_secretary.health import snapshot
 from call_secretary.isolated_audio import AudioSpec
@@ -351,6 +351,58 @@ def test_provider_failure_during_output_write_reopens_audio_for_local_phrase(set
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("stage", ["initial", "replacement"])
+def test_unreapable_audio_startup_is_fatal_even_before_endpoint_assignment(
+    settings, monkeypatch, stage
+):
+    from call_secretary import isolated_audio
+
+    class StartupFailure:
+        def __init__(self, direction, spec):
+            pass
+
+        async def receive(self, seconds):
+            raise AudioError("synthetic open timeout")
+
+        def stop(self):
+            raise AudioError("synthetic unreapable worker")
+
+    monkeypatch.setattr(isolated_audio, "AudioLane", StartupFailure)
+    opened = []
+
+    async def factory(spec):
+        if stage == "replacement" and not opened:
+            endpoint = Endpoint()
+            opened.append(endpoint)
+            return endpoint
+        return await isolated_audio.IsolatedAudio.open(spec)
+
+    @asynccontextmanager
+    async def connect(key, model):
+        raise OSError("synthetic connection failure")
+        yield
+
+    async def scenario():
+        with Store(settings.state_dir) as store:
+            with pytest.raises(AudioError):
+                await phone.handle_call(
+                    settings,
+                    store,
+                    OPTIONS,
+                    Control(),
+                    OBSERVED,
+                    b"\0\0",
+                    audio_factory=factory,
+                    connector=connect,
+                )
+            call = store.db.execute("SELECT * FROM calls").fetchone()
+            assert call["status"] == "audio_error" and call["ended"] is not None
+            assert store.counts()["summary_pending"] == 1
+            assert snapshot(store)["audio"]["state"] == "unavailable"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("spoken", [False, True])
 def test_real_at_controller_realtime_and_workers_form_one_offline_phone_journey(
     settings, monkeypatch, spoken
@@ -493,7 +545,19 @@ def test_real_at_controller_realtime_and_workers_form_one_offline_phone_journey(
 
 
 @pytest.mark.parametrize(
-    "mode", ["idle", "call", "stop_call", "cancel", "reconnect", "not_enrolled", "disabled"]
+    "mode",
+    [
+        "idle",
+        "call",
+        "stop_call",
+        "cancel",
+        "fatal",
+        "fatal_close",
+        "close_error",
+        "reconnect",
+        "not_enrolled",
+        "disabled",
+    ],
 )
 def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode):
     settings = accepted(settings)
@@ -531,12 +595,17 @@ def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode)
         class Link:
             def __init__(self):
                 self.channel = Mock()
+                if mode in {"fatal_close", "close_error"}:
+                    self.channel.close.side_effect = ModemError("synthetic close failure")
                 self.polls = 0
                 controls.append(self)
 
             def poll(self):
                 self.polls += 1
-                if mode in {"call", "stop_call", "cancel"} and self.polls == 1:
+                if (
+                    mode in {"call", "stop_call", "cancel", "fatal", "fatal_close"}
+                    and self.polls == 1
+                ):
                     return OBSERVED
                 if self.polls > 1:
                     callbacks[0]()
@@ -549,6 +618,8 @@ def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode)
             return Link()
 
         async def handle(*args):
+            if mode in {"fatal", "fatal_close"}:
+                raise FatalAudioError("synthetic unreapable worker")
             if mode == "cancel":
                 raise asyncio.CancelledError
             if mode == "stop_call":
@@ -564,6 +635,12 @@ def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode)
             assert not attempts
         elif mode == "cancel":
             with pytest.raises(asyncio.CancelledError):
+                await phone.run_phone(settings)
+        elif mode in {"fatal", "fatal_close"}:
+            with pytest.raises(FatalAudioError):
+                await phone.run_phone(settings)
+        elif mode == "close_error":
+            with pytest.raises(ModemError):
                 await phone.run_phone(settings)
         else:
             await asyncio.wait_for(phone.run_phone(settings), 2)
@@ -586,6 +663,25 @@ def test_phone_cli_dispatches_and_hardware_gate_is_not_implicit(settings, monkey
 
     monkeypatch.setattr(phone, "run_phone", run)
     assert cli.main(["phone-run"]) == 0 and called == [settings]
+
+
+def test_cli_fatal_exit_bypasses_multiprocessing_join_after_runtime_finalization(
+    settings, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli.Settings, "load", lambda *args: settings)
+
+    async def fatal(value):
+        raise FatalAudioError("private backend details")
+
+    exit_process = Mock(side_effect=SystemExit(2))
+    monkeypatch.setattr(phone, "run_phone", fatal)
+    monkeypatch.setattr(cli.os, "_exit", exit_process)
+    with pytest.raises(SystemExit) as result:
+        cli.main(["phone-run"])
+    assert result.value.code == 2
+    exit_process.assert_called_once_with(2)
+    output = capsys.readouterr().out
+    assert "supervisor restart" in output and "private" not in output
 
 
 def test_invalid_paid_policy_does_not_disable_free_error_reports_or_enrollment(
@@ -626,3 +722,73 @@ def test_invalid_paid_policy_does_not_disable_free_error_reports_or_enrollment(
     monkeypatch.setattr(telegram, "run_workers", workers)
     assert cli.main(["worker"]) == 0
     assert clients[0].closed
+
+
+@pytest.mark.parametrize("stage", ["simultaneous", "cleanup"])
+def test_fatal_audio_wins_over_concurrent_caller_or_usb_completion(stage):
+    async def operation():
+        if stage == "simultaneous":
+            raise FatalAudioError("synthetic native failure")
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise FatalAudioError("synthetic fatal cancellation cleanup")
+
+    async def watcher():
+        if stage == "simultaneous":
+            raise ModemError("synthetic concurrent USB failure")
+
+    async def scenario():
+        with pytest.raises(FatalAudioError):
+            await phone.race_call(operation(), watcher())
+
+    asyncio.run(scenario())
+
+
+def test_fatal_audio_during_realtime_skips_fallback_and_propagates(settings):
+    endpoints = []
+
+    class FatalInput(Endpoint):
+        async def read(self):
+            raise FatalAudioError("synthetic fatal native input failure")
+
+    async def open_audio(spec):
+        endpoint = FatalInput()
+        endpoints.append(endpoint)
+        return endpoint
+
+    class Socket:
+        def __init__(self):
+            self.first = True
+
+        async def send(self, message):
+            pass
+
+        async def recv(self):
+            if self.first:
+                self.first = False
+                return json.dumps({"type": "session.updated"})
+            await asyncio.Event().wait()
+
+    @asynccontextmanager
+    async def connect(key, model):
+        yield Socket()
+
+    async def scenario():
+        with Store(settings.state_dir) as store:
+            with pytest.raises(FatalAudioError):
+                await phone.handle_call(
+                    settings,
+                    store,
+                    OPTIONS,
+                    Control(),
+                    OBSERVED,
+                    b"\0\0",
+                    audio_factory=open_audio,
+                    connector=connect,
+                )
+            assert len(endpoints) == 1 and endpoints[0].closed
+            assert store.db.execute("SELECT status FROM calls").fetchone()[0] == "audio_error"
+            assert snapshot(store)["audio"]["state"] == "unavailable"
+
+    asyncio.run(scenario())

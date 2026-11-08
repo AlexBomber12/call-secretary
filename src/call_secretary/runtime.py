@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 
-from call_secretary.audio import AudioEndpoint
+from call_secretary.audio import AudioEndpoint, FatalAudioError
 from call_secretary.budget import Deadline, RateCard
 from call_secretary.config import ConfigError, Settings
 from call_secretary.isolated_audio import IsolatedAudio
@@ -42,6 +42,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
         monitor: asyncio.Task[None] | None = None
         status = "interrupted"
         attempted = False
+        fatal_error: FatalAudioError | None = None
         try:
             endpoint = await IsolatedAudio.open()
             attempted = True
@@ -71,6 +72,9 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 )
         except TimeoutError:
             status = "duration_limit"
+        except FatalAudioError as exc:
+            status = "audio_error"
+            fatal_error = exc
         except Exception:
             status = "provider_or_audio_error"
         finally:
@@ -83,6 +87,9 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
             if endpoint:
                 try:
                     await asyncio.wait_for(endpoint.close(), timeout=2)
+                except FatalAudioError as exc:
+                    status = "audio_error"
+                    fatal_error = exc
                 except Exception:
                     status = "audio_error"
             complete = bool(not attempted or (voice and voice.usage_complete and status == "ended"))
@@ -97,6 +104,8 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                     controller.ledger.consume(cid, f"{cid}:transcription_allowance", allowance)
             finally:
                 controller.finish(status, usage_complete=complete)
+                if fatal_error:
+                    raise fatal_error
         if status not in {"ended", "ended_text_incomplete", "duration_limit"}:
             raise VoiceError("Voice prototype interrupted; pending state retained")
         return cid

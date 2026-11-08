@@ -4,10 +4,12 @@ import argparse
 import asyncio
 import io
 import json
+import os
 import sys
 from decimal import Decimal
 from pathlib import Path
 
+from call_secretary.audio import FatalAudioError
 from call_secretary.budget import BudgetError
 from call_secretary.config import ConfigError, Settings
 
@@ -294,6 +296,16 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, BudgetError) as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False))
         return 2
+    except FatalAudioError:
+        try:
+            print(
+                json.dumps({"error": "Fatal audio cleanup failure; supervisor restart required"}),
+                flush=True,
+            )
+        finally:
+            # Normal multiprocessing exit joins daemon workers indefinitely.
+            # State is finalized; let systemd observe failure and kill the cgroup.
+            os._exit(2)
     except Exception:
         print(json.dumps({"error": "Operation failed; check configuration and retained state"}))
         return 2
