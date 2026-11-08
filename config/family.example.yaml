@@ -1,0 +1,45 @@
+# Proposed schema only; the application has not been implemented yet.
+# Copy to ignored config/family.yaml and fill in private settings before deployment.
+# All values below are synthetic. Never commit the real family configuration.
+schema_version: 1
+defaults:
+  greeting_language: it
+  conversation_language: auto
+  report_language: ru
+  call_max_duration_seconds: 600
+  text_retention_days: 0  # No automatic expiry.
+  audio_recording_enabled: false
+budget:
+  monthly_api_budget_eur: 50
+  timezone: Europe/Rome
+  scope: family
+routing:
+  unresolved_action: ask_recipient
+  unresolved_greeting: "Pronto, sono l'assistente. Per chi chiama?"
+  still_unresolved_action: hold_unassigned
+profiles:
+  - id: member_a
+    owner_name: "Persona A"
+    recipient_aliases: ["Persona A"]
+    greeting: "Pronto, sono l'assistente di Persona A. Cosa posso riferire?"
+    instructions: "Chiedi chi chiama e cosa desidera comunicare. Non assumere impegni."
+    report_language: ru
+    telegram_chat_id: "<PRIVATE_CHAT_ID_A>"
+  - id: member_b
+    owner_name: "Persona B"
+    recipient_aliases: ["Persona B"]
+    greeting: "Pronto, sono l'assistente di Persona B. Cosa posso riferire?"
+    instructions: "Chiedi chi chiama e cosa desidera comunicare. Non assumere impegni."
+    report_language: ru
+    telegram_chat_id: "<PRIVATE_CHAT_ID_B>"
+  - id: member_c
+    owner_name: "Persona C"
+    recipient_aliases: ["Persona C"]
+    greeting: "Pronto, sono l'assistente di Persona C. Cosa posso riferire?"
+    instructions: "Chiedi chi chiama e cosa desidera comunicare. Non assumere impegni."
+    report_language: ru
+    telegram_chat_id: "<PRIVATE_CHAT_ID_C>"
+# No automatic ingress routes are enabled until validated on real hardware.
+# Dedicated-line routes map stable ingress IDs to profiles. A shared-line route
+# additionally requires a validated original called/redirecting number field.
+ingress_routes: []

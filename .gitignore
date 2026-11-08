@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 secrets/
+config/family.yaml
 data/
 state/
 recordings/
