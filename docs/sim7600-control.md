@@ -1,6 +1,6 @@
 # SIM7600 control core: offline preparation
 
-`sim7600.py` accepts an injected serial object. It does **not** open a device, start phone service, connect Realtime, or demonstrate H1. The existing read-only modem inspector is unchanged.
+`sim7600.py` accepts an injected serial object. The separate [hardware-gated phone runtime](server-operations.md) now opens the explicit device and connects control, isolated audio, Realtime and durable workers. This does **not** demonstrate H1. The read-only inspector remains separate.
 
 The command contract follows the manufacturer's [SIM7500/SIM7600 AT manual v3.00](https://files.waveshare.com/wiki/SIM7600G-H/SIM7500_SIM7600_Series_AT_Command_Manual_V3.00.pdf): sections 2.2.6 (answer), 5.2.2 (voice hangup), and 5.2.7 (current-call snapshots). Call control disables automatic CLCC notifications before requesting snapshots. It supports one incoming, non-conference voice call; existing active, outgoing, data, held, waiting or multiple calls are refused.
 
@@ -8,6 +8,6 @@ The channel reads bounded blocks and separates response lines from unsolicited e
 
 Each observed incoming call has a token. Answer/hangup recheck the snapshot and token; repeated RING preserves it, while an observed replacement invalidates it. An end hint alone does not end a call that the snapshot still shows active. A rejected or malformed snapshot invalidates the previous token and ownership; polling cannot resume with stale ownership. The logical call retains its last known caller when an optional snapshot number is absent; this prevents missing metadata from hiding a later observed identity change. Caller metadata is kept out of representations and is never interpreted as the original family recipient.
 
-The future hardware opener must verify the dedicated SIM7600, claim its stable port exclusively, configure bounded read/write timeouts (at most 0.1/1 seconds), and ensure a clean command stream. Run this blocking adapter outside the asyncio event loop. The full runtime must confirm the post-answer snapshot before starting a fresh conversation. These pieces and the USB voice path remain pending.
+The implemented opener probes the SIM7600 model, checks ownership, claims its stable port exclusively and uses bounded 0.1/1-second read/write timeouts. Blocking control runs outside the asyncio loop. The runtime confirms an active post-answer snapshot before opening Realtime and watches for call end/replacement. USB stream names and sample rate must be recorded in H1; no firmware-specific audio activation commands are guessed. Code is tested with injected boundaries; actual firmware/USB acceptance remains pending.
 
 Snapshots and global modem commands are not an atomic compare-and-swap. Identical reused call IDs with missing transition events cannot prove a call boundary. H1 must inspect actual firmware events, timing, hangup and reconnection behavior before automatic answering is enabled. A passing fake-port test does not establish firmware voice support, Vodafone routing, USB audio format, or H2 metadata.

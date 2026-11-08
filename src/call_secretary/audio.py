@@ -15,6 +15,10 @@ class AudioError(RuntimeError):
     pass
 
 
+class FatalAudioError(AudioError):
+    """A native worker may still own hardware; the supervisor must stop its cgroup."""
+
+
 class AudioEndpoint(Protocol):
     latency_ms: int
 

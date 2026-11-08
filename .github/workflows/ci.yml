@@ -17,3 +17,11 @@ jobs:
       - run: python -m pip install -r requirements.lock
       - run: python -m pip install --no-deps -e .
       - run: python scripts/ci.py
+      - if: runner.os == 'Linux'
+        run: |
+          bash -n deploy/install-server.sh
+          bash -n deploy/activate-release.sh
+          bash -n tests/deployment-smoke.sh
+      - if: runner.os == 'Linux'
+        name: Deployment smoke in disposable Linux container
+        run: docker run --rm -e CALL_SECRETARY_CONTAINER_TEST=1 -v "$PWD:/source:ro" ubuntu:24.04 bash /source/tests/deployment-smoke.sh

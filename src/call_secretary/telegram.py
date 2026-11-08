@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from call_secretary import health
 from call_secretary.config import ConfigError, Family, chat_id
 from call_secretary.http_io import json_body
 from call_secretary.storage import Store
@@ -213,8 +214,10 @@ class DeliveryWorker:
             return True
         try:
             await self.api.request("sendMessage", {"chat_id": row["chat_id"], "text": row["text"]})
+            health.update(self.store, "telegram", "ready")
             self.store.delivery_complete(oid, token)
         except TelegramError as exc:
+            health.update(self.store, "telegram", "unavailable")
             delay = max(exc.retry_after, min(3600, 2 ** min(12, row["attempts"])))
             self.store.retry_job(
                 "outbox",
@@ -237,12 +240,17 @@ class BotPoller:
         with self.store.transaction() as db:
             row = db.execute("SELECT value FROM metadata WHERE key='telegram_offset'").fetchone()
         offset = int(row[0]) if row else 0
-        updates = await self.api.request(
-            "getUpdates",
-            {"offset": offset, "timeout": 20, "limit": 10, "allowed_updates": ["message"]},
-        )
+        try:
+            updates = await self.api.request(
+                "getUpdates",
+                {"offset": offset, "timeout": 20, "limit": 10, "allowed_updates": ["message"]},
+            )
+        except TelegramError:
+            health.update(self.store, "telegram", "unavailable")
+            raise
         if not isinstance(updates, list):
             raise TelegramError(0)
+        health.update(self.store, "telegram", "ready")
         for update in updates:
             uid = update.get("update_id")
             if type(uid) is not int or uid < offset:
