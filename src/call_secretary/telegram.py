@@ -117,7 +117,11 @@ class Enrollment:
             if invitation is None:
                 return False
             pid = invitation["profile_id"]
-            self.family.profile(pid)
+            try:
+                self.family.profile(pid)
+            except ConfigError:
+                db.execute("DELETE FROM invitations WHERE profile_id=?", (pid,))
+                return False
             if db.execute(
                 "SELECT 1 FROM bindings WHERE profile_id=? OR chat_id=?", (pid, target)
             ).fetchone():
@@ -183,7 +187,11 @@ class DeliveryWorker:
         if row is None:
             return False
         oid, token = row["id"], row["lease_token"]
-        profile = self.family.profile(row["profile_id"])
+        try:
+            profile = self.family.profile(row["profile_id"])
+        except ConfigError:
+            self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
+            return True
         with self.store.transaction() as db:
             binding = db.execute(
                 "SELECT * FROM bindings WHERE profile_id=?", (profile.id,)

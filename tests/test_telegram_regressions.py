@@ -43,6 +43,33 @@ def test_unbind_revokes_ungenerated_reports_including_active_calls(tmp_path, fam
     asyncio.run(scenario())
 
 
+def test_removed_profile_cannot_stop_other_deliveries_or_claim_an_old_invite(tmp_path, family):
+    async def scenario():
+        with Store(tmp_path / "state") as store:
+            enroll = Enrollment(store, family)
+            enroll.claim(enroll.invite("member_a"), "101")
+            token = enroll.invite("member_b")
+            # A report can already exist before this profile is removed from YAML.
+            cid = await simulate(store, family, "member_a", "old private message")
+            await SummaryWorker(store, family).process_one()
+            current = replace(family, profiles=family.profiles[2:])
+            enroll = Enrollment(store, current)
+            api = API()
+            worker = DeliveryWorker(store, current, api)
+            assert await worker.process_one()
+            assert store.db.execute("SELECT state FROM outbox").fetchone()[0] == "blocked"
+            assert not enroll.claim(token, "102")
+            assert store.db.execute("SELECT COUNT(*) FROM invitations").fetchone()[0] == 0
+            enroll.claim(enroll.invite("member_c"), "103")
+            new = await simulate(store, current, "member_c", "new private message")
+            await SummaryWorker(store, current).process_one()
+            assert await worker.process_one()
+            assert len(api.sent) == 1 and new in api.sent[0]["text"]
+            assert cid not in api.sent[0]["text"]
+
+    asyncio.run(scenario())
+
+
 def test_yaml_import_releases_waiting_reports_and_refreshes_enablement(tmp_path, family):
     async def scenario():
         with Store(tmp_path / "state") as store:

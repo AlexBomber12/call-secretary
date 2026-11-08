@@ -14,4 +14,6 @@ Revocation also covers assigned active calls and pending summaries that have not
 
 Transient send errors use persistent backoff and Telegram retry-after. A crash after a successful send but before local acknowledgement can cause a duplicate with the same call ID. Blocked destinations retain their reports for operator review. `backup --destination <new-path>` creates a consistent SQLite copy; treat it as private, like the original state.
 
+Removing a profile from YAML blocks its queued reports without stopping delivery for the remaining family. Previously issued invitations for a removed profile are rejected and revoked when presented; they cannot stop the polling worker.
+
 Automated tests use a fake Telegram service. Real bot enrollment/delivery has not been performed yet.
