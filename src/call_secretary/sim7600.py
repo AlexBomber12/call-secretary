@@ -191,44 +191,50 @@ class CallControl:
 
     def poll(self) -> ObservedCall | None:
         with self.channel._lock:
-            calls = [parse_call(line) for line in self.channel.execute("AT+CLCC")]
-            hints = self.channel.events()
-            ended_hint = any(
-                line in TERMINAL or (line.startswith("VOICE CALL") and "END" in line)
-                for line in hints
-            )
-            if not calls:
+            try:
+                return self._poll()
+            except ModemError:
                 self._current, self._owned = None, False
-                return None
-            if len(calls) != 1:
-                raise ModemError("Multiple calls are outside the single-channel pilot")
-            call = calls[0]
-            if call.direction != 1 or call.mode != 0 or call.multiparty or call.state not in {0, 4}:
-                raise ModemError("Not a supported incoming voice call")
-            previous = self._current
-            changed_caller = bool(
-                previous and previous.number and call.number and previous.number != call.number
-            )
-            if call.state == 0:
-                if (
-                    previous is None
-                    or previous.identity != call.identity
-                    or not self._owned
-                    or changed_caller
-                ):
-                    raise ModemError("Will not adopt an existing active call")
-            elif (
+                raise
+
+    def _poll(self) -> ObservedCall | None:
+        calls = [parse_call(line) for line in self.channel.execute("AT+CLCC")]
+        hints = self.channel.events()
+        ended_hint = any(
+            line in TERMINAL or (line.startswith("VOICE CALL") and "END" in line) for line in hints
+        )
+        if not calls:
+            self._current, self._owned = None, False
+            return None
+        if len(calls) != 1:
+            raise ModemError("Multiple calls are outside the single-channel pilot")
+        call = calls[0]
+        if call.direction != 1 or call.mode != 0 or call.multiparty or call.state not in {0, 4}:
+            raise ModemError("Not a supported incoming voice call")
+        previous = self._current
+        changed_caller = bool(
+            previous and previous.number and call.number and previous.number != call.number
+        )
+        if call.state == 0:
+            if (
                 previous is None
                 or previous.identity != call.identity
-                or previous.state == 0
-                or ended_hint
+                or not self._owned
                 or changed_caller
             ):
-                self._current = ObservedCall(str(uuid.uuid4()), call.identity, 4, call.number)
-                self._owned = False
-            assert self._current is not None
-            self._current = replace(self._current, state=call.state, number=call.number)
-            return self._current
+                raise ModemError("Will not adopt an existing active call")
+        elif (
+            previous is None
+            or previous.identity != call.identity
+            or previous.state == 0
+            or ended_hint
+            or changed_caller
+        ):
+            self._current = ObservedCall(str(uuid.uuid4()), call.identity, 4, call.number)
+            self._owned = False
+        assert self._current is not None
+        self._current = replace(self._current, state=call.state, number=call.number)
+        return self._current
 
     def _check(self, token: str) -> ObservedCall:
         current = self.poll()

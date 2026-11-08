@@ -334,3 +334,27 @@ def test_changed_active_caller_is_not_treated_as_the_owned_call():
     calls.answer(calls.poll().token)
     with pytest.raises(ModemError, match="Will not adopt"):
         calls.poll()
+
+
+@pytest.mark.parametrize("intervening", [b"+CLCC: 1,0,2,0,0\r\n", b"+CLCC: malformed\r\n"])
+def test_rejected_snapshot_invalidates_previous_token_even_with_identical_reused_id(intervening):
+    incoming = b"+CLCC: 1,1,4,0,0\r\n"
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [incoming, b"OK\r\n"],
+            [intervening, b"OK\r\n"],
+            [incoming, b"OK\r\n"],
+            [incoming, b"OK\r\n"],
+            [b"OK\r\n"],
+        ]
+    )
+    calls = CallControl(ATChannel(port))
+    old = calls.poll()
+    with pytest.raises(ModemError):
+        calls.poll()
+    replacement = calls.poll()
+    assert replacement.token != old.token
+    with pytest.raises(ModemError, match="Stale"):
+        calls.answer(old.token)
+    assert b"ATA\r" not in port.writes
