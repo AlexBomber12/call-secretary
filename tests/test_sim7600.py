@@ -358,3 +358,56 @@ def test_rejected_snapshot_invalidates_previous_token_even_with_identical_reused
     with pytest.raises(ModemError, match="Stale"):
         calls.answer(old.token)
     assert b"ATA\r" not in port.writes
+
+
+def test_missing_incoming_metadata_cannot_hide_a_later_changed_caller():
+    missing = b"+CLCC: 1,1,4,0,0\r\n"
+    other = snapshot(number="+39000000456")
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [missing, b"OK\r\n"],
+            [other, b"OK\r\n"],
+            [other, b"OK\r\n"],
+            [b"OK\r\n"],
+        ]
+    )
+    calls = CallControl(ATChannel(port))
+    first = calls.poll()
+    assert calls.poll().token == first.token
+    changed = calls.poll()
+    assert changed.token != first.token
+    with pytest.raises(ModemError, match="Stale"):
+        calls.answer(first.token)
+    assert b"ATA\r" not in port.writes
+
+
+def test_missing_active_metadata_does_not_erase_previously_observed_identity():
+    missing = b"+CLCC: 1,1,0,0,0\r\n"
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [b"OK\r\n"],
+            [missing, b"OK\r\n"],
+            [snapshot(0, number="+39000000456"), b"OK\r\n"],
+        ]
+    )
+    calls = CallControl(ATChannel(port))
+    first = calls.poll()
+    calls.answer(first.token)
+    assert calls.poll().number == first.number
+    with pytest.raises(ModemError, match="Will not adopt"):
+        calls.poll()
+
+
+def test_late_first_caller_metadata_preserves_the_same_call():
+    missing = b"+CLCC: 1,1,4,0,0\r\n"
+    port = Port([[b"OK\r\n"], [missing, b"OK\r\n"], [snapshot(), b"OK\r\n"]])
+    calls = CallControl(ATChannel(port))
+    first = calls.poll()
+    later = calls.poll()
+    assert later.token == first.token
+    assert later.number == "+39000000123"

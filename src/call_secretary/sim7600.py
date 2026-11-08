@@ -163,6 +163,8 @@ class ATChannel:
 
 @dataclass(frozen=True)
 class ObservedCall:
+    """Logical call with its last known caller, distinct from optional snapshot metadata."""
+
     token: str
     identity: int
     state: int
@@ -233,7 +235,9 @@ class CallControl:
             self._current = ObservedCall(str(uuid.uuid4()), call.identity, 4, call.number)
             self._owned = False
         assert self._current is not None
-        self._current = replace(self._current, state=call.state, number=call.number)
+        self._current = replace(
+            self._current, state=call.state, number=call.number or self._current.number
+        )
         return self._current
 
     def _check(self, token: str) -> ObservedCall:
