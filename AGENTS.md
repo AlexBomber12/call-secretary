@@ -1,6 +1,6 @@
 # Call Secretary contributor instructions
 
-This repository uses a manual, test-first workflow. It has no Pipeline Orchestrator, coding daemon, task queue, autonomous merge bot, or related run-record and escalation machinery.
+This repository uses a PR-based, test-first workflow. It does not require a Pipeline Orchestrator, coding daemon, task queue, or external merge daemon.
 
 ## PLANNED PR
 
@@ -9,7 +9,7 @@ This repository uses a manual, test-first workflow. It has no Pipeline Orchestra
 3. Implement only the approved coherent outcome. Keep production changes minimal and independently testable.
 4. Write meaningful tests, then run the complete local gate with `scripts/ci.sh`. Do not reduce coverage or disable a failing test.
 5. Commit and push the task branch. Open a ready GitHub pull request with real validation evidence, and verify that the remote PR HEAD matches the local HEAD.
-6. When the operator authorizes complete task execution, continue on the same PR through the `FIX FEEDBACK` loop until the current HEAD is validated and ready for human merge authorization. Otherwise stop after publication. Never merge automatically.
+6. Complete the approved task through the `FIX FEEDBACK` loop, then merge the validated PR and continue the next approved outcome. Do not ask for separate merge confirmation. Stop before merging only when the user explicitly requests that boundary.
 
 ## FIX FEEDBACK
 
@@ -18,9 +18,9 @@ This repository uses a manual, test-first workflow. It has no Pipeline Orchestra
 3. Make only necessary, coherent regression fixes and avoid unrelated refactors. Add or update tests that demonstrate each correction.
 4. Run `scripts/ci.sh` again, commit, and push to the same PR branch.
 5. Verify the new remote HEAD and its GitHub Actions results. If a Codex Review is not already running for that HEAD, request one; never send a duplicate request for a running current-HEAD review.
-6. Repeat without an artificial iteration limit until current-HEAD CI passes and the latest review has no unresolved actionable P1/P2 findings, or report a genuine blocker with a defensible rationale. Every pushed correction requires fresh current-HEAD validation. Do not weaken CI or tests, and do not merge automatically.
+6. Repeat without an artificial iteration limit until current-HEAD CI passes and the latest review has no unresolved actionable P1/P2 findings, or report a genuine blocker with a defensible rationale. Every pushed correction requires fresh current-HEAD validation. Do not weaken CI or tests. Merge once the eligibility conditions below are met.
 
-The normal authorized sequence is: implement, run local CI, commit, push, open the PR, wait for GitHub Actions, request and evaluate Codex Review, fix actionable feedback with regression tests, rerun local CI, commit and push, request a current-HEAD review when needed, and repeat before reporting final validation status.
+The normal authorized sequence is: implement, run local CI, commit, push, open the PR, wait for GitHub Actions, request and evaluate Codex Review, fix actionable feedback with regression tests, rerun local CI, commit and push, request a current-HEAD review when needed, and repeat until eligible. Merge the exact validated HEAD, verify the resulting main branch, then continue the next approved outcome or report a genuine blocker.
 
 ## Merge eligibility
 
@@ -29,7 +29,7 @@ A PR may be merged only when all of the following are true:
 - Every applicable GitHub Actions check succeeded on the current PR HEAD.
 - The latest Codex Review for the current HEAD completed without unresolved actionable P1/P2 findings. An old review from before the latest push never qualifies.
 - When a Codex bot `+1` reaction is available, it is non-stale positive review evidence. A generic `Completed` summary alone is not approval.
-- The human operator authorizes the merge.
+- The PR stays within the approved task scope and the user has not explicitly requested a stop before merge. Routine merging is already authorized; no additional approval is required.
 
 ## Security, testing, and repository rules
 
