@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+RECIPIENT_DISPUTED = "recipient_disputed"
+
 
 class StorageError(RuntimeError):
     pass
@@ -183,15 +185,28 @@ class Store:
 
     def route_call(self, cid: str, profile_id: str, source: str) -> None:
         with self.transaction() as db:
-            row = db.execute("SELECT profile_id,ended FROM calls WHERE id=?", (cid,)).fetchone()
+            row = db.execute(
+                "SELECT profile_id,ended,status FROM calls WHERE id=?", (cid,)
+            ).fetchone()
             if row is None or row["ended"] is not None:
                 raise StorageError("Cannot route inactive call")
+            if row["status"] == RECIPIENT_DISPUTED:
+                raise StorageError("Call recipient is disputed")
             if row["profile_id"] not in (None, profile_id):
                 raise StorageError("Call recipient is already fixed")
             db.execute(
                 "UPDATE calls SET profile_id=?,route_source=?,status='conversing' WHERE id=?",
                 (profile_id, source, cid),
             )
+
+    def dispute_recipient(self, cid: str) -> None:
+        with self.transaction() as db:
+            result = db.execute(
+                "UPDATE calls SET status=? WHERE id=? AND ended IS NULL AND profile_id IS NOT NULL",
+                (RECIPIENT_DISPUTED, cid),
+            )
+            if not result.rowcount:
+                raise StorageError("Recipient dispute requires an active assigned call")
 
     def utterance(
         self,
@@ -240,9 +255,15 @@ class Store:
     ) -> None:
         with self.transaction() as db:
             db.execute(
-                "UPDATE calls SET status=?,ended=?,voice_usage_complete=? "
-                "WHERE id=? AND ended IS NULL",
-                (status, time.time() if now is None else now, int(voice_usage_complete), cid),
+                "UPDATE calls SET status=CASE WHEN status=? THEN status ELSE ? END,"
+                "ended=?,voice_usage_complete=? WHERE id=? AND ended IS NULL",
+                (
+                    RECIPIENT_DISPUTED,
+                    status,
+                    time.time() if now is None else now,
+                    int(voice_usage_complete),
+                    cid,
+                ),
             )
             db.execute("INSERT OR IGNORE INTO summary_jobs(call_id) VALUES(?)", (cid,))
 
@@ -252,8 +273,9 @@ class Store:
             rows = db.execute("SELECT id FROM calls WHERE ended IS NULL").fetchall()
             for row in rows:
                 db.execute(
-                    "UPDATE calls SET status='interrupted',ended=? WHERE id=?",
-                    (timestamp, row["id"]),
+                    "UPDATE calls SET status=CASE WHEN status=? THEN status ELSE 'interrupted' END,"
+                    "ended=? WHERE id=?",
+                    (RECIPIENT_DISPUTED, timestamp, row["id"]),
                 )
                 db.execute("INSERT OR IGNORE INTO summary_jobs(call_id) VALUES(?)", (row["id"],))
         return len(rows)
@@ -322,13 +344,13 @@ class Store:
             ).fetchone()
             if job is None or job["state"] != "leased" or job["lease_token"] != token:
                 return False
-            call = db.execute("SELECT profile_id FROM calls WHERE id=?", (cid,)).fetchone()
+            call = db.execute("SELECT profile_id,status FROM calls WHERE id=?", (cid,)).fetchone()
             content = json.dumps(summary, ensure_ascii=False)
             db.execute(
                 "INSERT INTO summaries VALUES(?,?,?) ON CONFLICT(call_id) DO NOTHING",
                 (cid, content, time.time() if now is None else now),
             )
-            if call["profile_id"]:
+            if call["profile_id"] and call["status"] != RECIPIENT_DISPUTED:
                 revoked = (
                     db.execute(
                         "SELECT 1 FROM metadata WHERE key=?", ("delivery_revoked:" + cid,)

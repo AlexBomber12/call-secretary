@@ -22,7 +22,9 @@ from call_secretary.telegram import DeliveryWorker, Enrollment, TelegramClient, 
 from call_secretary.voice import Realtime, ToolReply
 
 
-@pytest.mark.parametrize("tool", ["select_recipient", "finish_call", None])
+@pytest.mark.parametrize(
+    "tool", ["select_recipient", "finish_call", "report_recipient_conflict", None]
+)
 def test_completed_but_interrupted_response_cannot_execute_stale_tools(rates, tool):
     class Track(Hooks):
         def __init__(self):

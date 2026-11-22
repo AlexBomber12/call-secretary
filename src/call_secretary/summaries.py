@@ -16,7 +16,7 @@ import httpx
 from call_secretary.budget import BudgetError, Ledger, RateCard
 from call_secretary.config import ConfigError, Family, Profile
 from call_secretary.http_io import json_body
-from call_secretary.storage import Store
+from call_secretary.storage import RECIPIENT_DISPUTED, Store
 
 FIELDS = ("caller_name", "organization", "purpose", "callback", "next_step", "language")
 SCHEMA: dict[str, Any] = {
@@ -185,6 +185,7 @@ def render(
             "interrupted": "прерван",
             "duration_limit": "лимит времени",
             "recipient_timeout": "адресат не определён",
+            RECIPIENT_DISPUTED: "адресат оспорен",
             "silence_timeout": "длительная тишина",
             "budget_refused": "лимит расходов",
             "ended_text_incomplete": "часть текста не распознана",
@@ -198,6 +199,7 @@ def render(
             "interrupted": "interrotta",
             "duration_limit": "limite di durata",
             "recipient_timeout": "destinatario non identificato",
+            RECIPIENT_DISPUTED: "destinatario contestato",
             "silence_timeout": "silenzio",
             "budget_refused": "limite di spesa",
             "ended_text_incomplete": "trascrizione incompleta",
@@ -208,6 +210,7 @@ def render(
             "interrupted": "interrupted",
             "duration_limit": "duration limit",
             "recipient_timeout": "recipient unresolved",
+            RECIPIENT_DISPUTED: "recipient disputed",
             "silence_timeout": "silence",
             "budget_refused": "spending limit",
             "ended_text_incomplete": "incomplete transcript",
@@ -315,7 +318,11 @@ class SummaryWorker:
         try:
             call = self.store.call(cid)
             try:
-                profile = self.family.profile(call["profile_id"]) if call["profile_id"] else None
+                profile = (
+                    self.family.profile(call["profile_id"])
+                    if call["profile_id"] and call["status"] != RECIPIENT_DISPUTED
+                    else None
+                )
             except ConfigError:
                 self.store.retry_job("summary_jobs", cid, token, 1, blocked=True)
                 return True

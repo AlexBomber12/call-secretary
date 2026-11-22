@@ -6,7 +6,7 @@ from typing import Any
 
 from call_secretary.budget import BudgetError, Ledger, RateCard
 from call_secretary.config import ConfigError, Family, Profile
-from call_secretary.routing import Incoming, Router
+from call_secretary.routing import REPORT_RECIPIENT_CONFLICT, Incoming, Router
 from call_secretary.storage import Store
 from call_secretary.voice import Realtime, ToolReply
 
@@ -88,6 +88,13 @@ class CallController:
             return ToolReply("call_already_ended", finish=True)
         if name == "finish_call" and not arguments:
             return ToolReply("finished", finish=True)
+        if name == REPORT_RECIPIENT_CONFLICT and not arguments and self.profile is not None:
+            self.store.dispute_recipient(self.cid)
+            return ToolReply(
+                "Delivery held for manual review. Collect the message without promising delivery.",
+                self.router.instructions(None, disputed=True),
+                self.router.tools(None, disputed=True),
+            )
         if name != "select_recipient" or self.profile is not None:
             return ToolReply("recipient_fixed_or_unsupported_tool")
         self.attempts += 1

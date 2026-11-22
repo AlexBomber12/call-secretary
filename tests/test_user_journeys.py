@@ -594,3 +594,87 @@ def test_summary_cannot_start_paid_work_when_voice_usage_leaves_insufficient_bud
             assert Decimal(call.ledger.status()["committed_eur"]) == Decimal("49.99")
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+@pytest.mark.parametrize("recover", [False, True])
+def test_disputed_recipient_is_held_without_private_delivery(
+    tmp_path, family, rates, automatic, recover
+):
+    async def scenario():
+        path = tmp_path / "state"
+        assigned, alternative = family.profiles[:2]
+        if automatic:
+            configured = replace(family, routes=(IngressRoute("shared", assigned.id, None, True),))
+        else:
+            configured = family
+        with Store(path, mode="live") as store:
+            enrollment = Enrollment(store, configured)
+            for profile, chat in [(assigned, "101"), (alternative, "102")]:
+                assert enrollment.claim(enrollment.invite(profile.id), chat)
+            call = CallController(store, configured, Incoming("shared"), rates=rates, paid=True)
+            cid = call.cid
+            socket = RecordingSocket()
+            voice = Realtime(
+                socket,
+                SilentAudio(),
+                call,
+                rates,
+                call.router.instructions(call.profile),
+                call.router.tools(call.profile),
+                "marin",
+            )
+            await voice.handle({"type": "session.updated"})
+            await complete_response(voice, "greeting")
+            if not automatic:
+                await caller_words(voice, "recipient", "Per Persona A.")
+                await complete_response(
+                    voice, "selection", ("select_recipient", {"profile_id": assigned.id})
+                )
+                await complete_response(voice, "question")
+            assert call.profile == assigned
+            assert "report_recipient_conflict" in {tool["name"] for tool in voice.tools}
+
+            await caller_words(voice, "correction", "Mi correggo, il messaggio è per Persona B.")
+            await complete_response(voice, "conflict", ("report_recipient_conflict", {}))
+            row = store.call(cid)
+            assert row["status"] == "recipient_disputed"
+            assert row["profile_id"] == assigned.id
+            assert row["route_source"] == ("dedicated_line" if automatic else "caller_selected")
+            for profile in configured.profiles:
+                assert profile.owner_name not in voice.prompt
+            assert [tool["name"] for tool in voice.tools] == ["finish_call"]
+            update = [e["session"] for e in socket.sent if e["type"] == "session.update"][-1]
+            assert set(update) == {"type", "instructions", "tools"}
+            assert not (
+                await call.tool("select_recipient", {"profile_id": alternative.id})
+            ).instructions
+            with pytest.raises(StorageError, match="disputed"):
+                store.route_call(cid, assigned.id, "caller_selected")
+            await complete_response(voice, "hold_notice")
+            await caller_words(voice, "message", "Messaggio sintetico per verifica manuale.")
+            await complete_response(voice, "farewell", ("finish_call", {}))
+            await asyncio.wait_for(voice.finish_event.wait(), timeout=1)
+            if not recover:
+                call.finish("caller_hangup", usage_complete=voice.usage_complete)
+
+        with Store(path, mode="live") as store:
+            assert store.recover_calls() == int(recover)
+            assert store.call(cid)["status"] == "recipient_disputed"
+            assert store.call(cid)["profile_id"] == assigned.id
+            assert store.transcript(cid)[-1]["item_id"] == "message"
+            provider = GeneratedSummary(purpose="Synthetic report")
+            assert await SummaryWorker(
+                store, configured, provider=provider, rates=rates
+            ).process_one()
+            assert provider.requests == []
+            assert store.db.execute("SELECT count(*) FROM summaries").fetchone()[0] == 1
+            assert store.db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 0
+            captured = CapturedTelegram()
+            assert not await DeliveryWorker(store, configured, captured).process_one()
+            assert not captured.receipts
+            assert store.db.execute(
+                "SELECT closed FROM budget_reservations WHERE call_id=?", (cid,)
+            ).fetchone()[0] == int(not recover)
+
+    asyncio.run(scenario())

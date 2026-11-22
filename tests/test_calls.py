@@ -91,3 +91,22 @@ def test_simulation_does_not_reserve_real_budget(tmp_path):
             assert store.db.execute("SELECT COUNT(*) FROM budget_reservations").fetchone()[0] == 0
 
     asyncio.run(scenario())
+
+
+def test_recipient_conflict_tool_rejects_unassigned_call_and_arguments(tmp_path, family):
+    async def scenario():
+        with Store(tmp_path / "state") as store:
+            call = CallController(store, family, Incoming("shared"))
+            assert "report_recipient_conflict" not in {
+                tool["name"] for tool in call.router.tools(call.profile)
+            }
+            reply = await call.tool("report_recipient_conflict", {})
+            assert reply.instructions is None
+            await call.tool("select_recipient", {"profile_id": "member_a"})
+            reply = await call.tool("report_recipient_conflict", {"profile_id": "member_b"})
+            assert reply.instructions is None
+            assert store.call(call.cid)["status"] == "conversing"
+            call.finish("ended")
+            assert store.call(call.cid)["status"] == "ended"
+
+    asyncio.run(scenario())
