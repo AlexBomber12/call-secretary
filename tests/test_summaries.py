@@ -1,6 +1,8 @@
 import asyncio
 import json
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -143,6 +145,61 @@ def test_unknown_paid_attempt_keeps_reservation_and_is_not_retried_after_restart
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("replay_rates", [None, "expired_other_model"])
+def test_replaying_checkpoint_debits_original_tariff_without_current_pricing(
+    tmp_path, family, rates, monkeypatch, replay_rates
+):
+    async def scenario():
+        path = tmp_path / "state"
+        with Store(path) as store:
+            cid = await simulate(store, family, "member_b", "Synthetic call")
+            provider = Provider()
+            with monkeypatch.context() as patch:
+
+                def fail_debit(*args, **kwargs):
+                    raise RuntimeError("synthetic failure after checkpoint")
+
+                patch.setattr(Ledger, "consume", fail_debit)
+                assert await SummaryWorker(
+                    store, family, provider=provider, rates=rates
+                ).process_one()
+            assert provider.calls == 1 and store.counts()["summary_pending"] == 1
+            raw = store.db.execute(
+                "SELECT value FROM metadata WHERE key=?", ("summary_checkpoint:" + cid,)
+            ).fetchone()[0]
+            data = json.loads(raw)
+            charge = data["tariff"]["eur"]
+            assert Decimal(charge) == Decimal("0.0000675")
+            assert data["tariff"]["model"] == "gpt-6-luna"
+            with store.transaction() as db:
+                db.execute("UPDATE summary_jobs SET not_before=0 WHERE call_id=?", (cid,))
+        with Store(path) as store:
+            replacement = (
+                None
+                if replay_rates is None
+                else replace(
+                    rates,
+                    reviewed_on=date(2000, 1, 1),
+                    summary_model="gpt-4.1-mini",
+                    usd_to_eur_upper_bound=Decimal("4"),
+                )
+            )
+            assert await SummaryWorker(
+                store, family, provider=provider, rates=replacement
+            ).process_one()
+            assert provider.calls == 1
+            usage = store.db.execute("SELECT amount FROM usage_events WHERE call_id=?", (cid,))
+            assert [u["amount"] for u in usage] == [68]
+            assert (
+                store.db.execute(
+                    "SELECT closed FROM budget_reservations WHERE call_id=?", (cid,)
+                ).fetchone()[0]
+                == 1
+            )
+
+    asyncio.run(scenario())
+
+
 def test_cached_generation_is_reused_after_crash_before_delivery(tmp_path):
     async def scenario():
         family = load_family(Path("config/family.example.yaml"))
@@ -164,5 +221,13 @@ def test_cached_generation_is_reused_after_crash_before_delivery(tmp_path):
             await SummaryWorker(store, family, provider=provider, rates=rates).process_one()
             assert provider.calls == 0
             assert store.counts()["summary_pending"] == 0
+            assert (
+                store.db.execute(
+                    "SELECT closed FROM budget_reservations WHERE call_id=?", (cid,)
+                ).fetchone()[0]
+                == 0
+            )
+            result = json.loads(store.db.execute("SELECT content FROM summaries").fetchone()[0])
+            assert "Просит перезвонить" in result["purpose"]
 
     asyncio.run(scenario())

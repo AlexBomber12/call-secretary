@@ -7,13 +7,13 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from call_secretary.budget import BudgetError, Ledger, RateCard
+from call_secretary.budget import DEFAULT_SUMMARY_MODEL, BudgetError, Ledger, RateCard
 from call_secretary.config import ConfigError, Family, Profile
 from call_secretary.http_io import json_body
 from call_secretary.storage import RECIPIENT_DISPUTED, Store
@@ -235,6 +235,7 @@ class SummaryProvider(Protocol):
 @dataclass
 class OpenAISummary:
     api_key: str = field(repr=False)
+    model: str = DEFAULT_SUMMARY_MODEL
 
     async def generate(self, payload: dict[str, Any], language: str) -> dict[str, Any]:
         for name in ("httpx", "httpcore"):
@@ -246,6 +247,12 @@ class OpenAISummary:
             "Interrupted assistant text may not have been heard; it is not a caller request. "
             "Unknown fields must be null and urgency unknown. Include uncertainty explicitly."
         )
+        model_options = {}
+        if self.model == "gpt-6-luna":
+            model_options = {
+                "reasoning": {"effort": "none"},
+                "prompt_cache_options": {"mode": "explicit"},
+            }
         async with asyncio.timeout(30):
             async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
                 async with client.stream(
@@ -253,7 +260,8 @@ class OpenAISummary:
                     "https://api.openai.com/v1/responses",
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={
-                        "model": "gpt-4.1-mini",
+                        "model": self.model,
+                        **model_options,
                         "store": False,
                         "max_output_tokens": 768,
                         "input": [
@@ -285,7 +293,7 @@ class OpenAISummary:
             if part.get("type") == "output_text"
         )
         return {
-            "id": str(body.get("id", "")),
+            "id": body.get("id"),
             "usage": body.get("usage"),
             "text": text if body.get("status") == "completed" else "",
         }
@@ -376,6 +384,7 @@ class SummaryWorker:
                 if can_generate:
                     try:
                         response = await self.provider.generate(payload, profile.report_language)
+                        response["tariff"] = self.rates.summary_tariff(response["usage"])
                         if len(json.dumps(response)) > 24000:
                             raise SummaryError("Summary checkpoint exceeds size limit")
                         # Persist reduced text/usage before debit; retries reuse this checkpoint.
@@ -392,27 +401,36 @@ class SummaryWorker:
                     except Exception:
                         response = None
                     known_usage = False
-            if response is not None and self.rates:
+            if response is not None:
                 try:
-                    usage = response["usage"]
-                    ni, no = usage["input_tokens"], usage["output_tokens"]
-                    if (
-                        type(ni) is not int
-                        or type(no) is not int
-                        or min(ni, no) < 0
-                        or not response["id"]
-                    ):
-                        raise SummaryError("Invalid summary usage")
-                    cost = (
-                        (Decimal(ni) * Decimal("0.40") + Decimal(no) * Decimal("1.60"))
-                        / 1_000_000
-                        * self.rates.usd_to_eur_upper_bound
-                    )
-                    if not self.ledger.consume(cid, f"{cid}:summary:{response['id']}", cost):
-                        raise BudgetError("Summary exceeded reservation")
-                    known_usage = True
+                    response_id = response["id"]
+                    if not isinstance(response_id, str) or not response_id:
+                        raise SummaryError("Invalid summary response ID")
+                    event_id = f"{cid}:summary:{response_id}"
+                    if "tariff" in response:
+                        cost = Decimal(response["tariff"]["eur"])
+                        if not self.ledger.consume(cid, event_id, cost):
+                            raise BudgetError("Summary exceeded reservation")
+                        known_usage = True
+                    else:
+                        # A legacy checkpoint can preserve its text, but the FX applied
+                        # to an unrecorded charge cannot be reconstructed after restart.
+                        with self.store.transaction() as db:
+                            known_usage = bool(
+                                db.execute(
+                                    "SELECT 1 FROM usage_events WHERE call_id=? AND id=?",
+                                    (cid, event_id),
+                                ).fetchone()
+                            )
                     result = validate_summary(json.loads(response["text"]))
-                except (ValueError, TypeError, KeyError, BudgetError, SummaryError):
+                except (
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                    InvalidOperation,
+                    BudgetError,
+                    SummaryError,
+                ):
                     result = fallback(transcript)
             # Derive the warning from retained input even when replaying a
             # checkpoint. A model omission or a restart cannot erase this fact.

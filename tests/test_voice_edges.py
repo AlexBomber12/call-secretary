@@ -3,10 +3,12 @@ import base64
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import date
 
 import pytest
 from test_voice import Endpoint, Hooks, Socket
 
+from call_secretary.config import ConfigError
 from call_secretary.voice import Realtime, ToolReply, VoiceError, connect_api
 
 
@@ -58,6 +60,24 @@ def test_response_limits_closing_and_pending_turns(rates):
         voice = Realtime(Socket(), Endpoint(), Hooks(), rates, "p", [], "v")
         await voice.close_soon()
         assert voice.closing and voice.pending
+
+    asyncio.run(scenario())
+
+
+def test_expired_rates_stop_new_paid_events_even_in_an_open_session(rates):
+    class Audio(Endpoint):
+        async def read(self):
+            return b"\\0\\0"
+
+    async def scenario():
+        socket = Socket()
+        expired = replace(rates, reviewed_on=date(2000, 1, 1))
+        voice = Realtime(socket, Audio(), Hooks(), expired, "p", [], "v")
+        with pytest.raises(ConfigError):
+            await voice.request_response()
+        with pytest.raises(ConfigError):
+            await voice._capture()
+        assert socket.sent == [] and voice.input_bytes == 0 and not voice.pending
 
     asyncio.run(scenario())
 

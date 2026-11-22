@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import json
+from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -69,11 +71,14 @@ def rates():
         Decimal("64"),
         Decimal("4"),
         Decimal("24"),
+        reviewed_on=datetime.now(UTC).date(),
     )
 
 
 def test_configuration_uses_current_nested_audio_and_client_controls_responses():
-    session = session_update("prompt", [], "marin", rates())["session"]
+    reviewed = replace(rates(), transcription_model="gpt-4o-mini-transcribe")
+    session = session_update("prompt", [], "marin", reviewed)["session"]
+    assert session["audio"]["input"]["transcription"]["model"] == reviewed.transcription_model
     assert session["audio"]["input"]["format"] == {"type": "audio/pcm", "rate": 24000}
     assert session["audio"]["input"]["turn_detection"]["create_response"] is False
     assert session["truncation"]["token_limits"]["post_instructions"] == 4096
