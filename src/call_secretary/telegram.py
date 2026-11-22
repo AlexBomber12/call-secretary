@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import secrets
+import sqlite3
 import time
 from typing import Any, Protocol
 
@@ -45,10 +46,14 @@ class CapturedTelegram:
         return {"message_id": len(self.receipts)}
 
 
+def validate_token(token: str) -> None:
+    if not token or any(c.isspace() or c in "/?&#" for c in token):
+        raise ConfigError("Invalid Telegram token format")
+
+
 class TelegramClient:
     def __init__(self, token: str, *, transport: httpx.AsyncBaseTransport | None = None):
-        if not token or any(c.isspace() or c in "/?&#" for c in token):
-            raise ConfigError("Invalid Telegram token format")
+        validate_token(token)
         self._token = token
         for name in ("httpx", "httpcore"):
             logging.getLogger(name).setLevel(logging.WARNING)
@@ -155,18 +160,32 @@ class Enrollment:
                 (profile_id,),
             )
 
+    def validate_explicit_destinations(self) -> None:
+        """Preflight the YAML addresses without updating the enrollment or delivery queues."""
+        with self.store.transaction() as db:
+            self._check_explicit_destinations(db)
+
+    def _check_explicit_destinations(self, db: sqlite3.Connection) -> None:
+        for profile in self.family.profiles:
+            if profile.telegram_chat_id:
+                rows = db.execute(
+                    "SELECT profile_id,chat_id FROM bindings WHERE profile_id=? OR chat_id=?",
+                    (profile.id, profile.telegram_chat_id),
+                ).fetchall()
+                if any(
+                    row["profile_id"] != profile.id or row["chat_id"] != profile.telegram_chat_id
+                    for row in rows
+                ):
+                    raise ConfigError(
+                        "Destination differs from enrolled chat; explicit unbind required"
+                    )
+
     def import_explicit_destinations(self) -> None:
         """Import YAML destinations and synchronize all existing private bindings."""
         with self.store.transaction() as db:
+            self._check_explicit_destinations(db)
             for p in self.family.profiles:
                 if p.telegram_chat_id:
-                    old = db.execute(
-                        "SELECT chat_id FROM bindings WHERE profile_id=?", (p.id,)
-                    ).fetchone()
-                    if old and old[0] != p.telegram_chat_id:
-                        raise ConfigError(
-                            "Destination differs from enrolled chat; explicit unbind required"
-                        )
                     db.execute(
                         "INSERT OR IGNORE INTO bindings VALUES(?,?,?)",
                         (p.id, p.telegram_chat_id, int(p.enabled)),

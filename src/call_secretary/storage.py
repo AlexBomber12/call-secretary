@@ -23,7 +23,6 @@ class StorageError(RuntimeError):
 
 
 SCHEMA = """
-BEGIN IMMEDIATE;
 CREATE TABLE calls (
  id TEXT PRIMARY KEY, ingress_id TEXT NOT NULL, caller_number TEXT,
  original_called_number TEXT, profile_id TEXT, route_source TEXT,
@@ -68,8 +67,23 @@ CREATE TABLE usage_events (
 );
 CREATE TABLE metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
 PRAGMA user_version=1;
-COMMIT;
 """
+
+
+def enable_wal(db: sqlite3.Connection) -> None:
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            mode = db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if mode != "wal":
+                raise StorageError("Cannot enable WAL for the private state database")
+            return
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", 0)
+            if code & 0xFF != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                raise
+            # SQLite can return BUSY immediately while changing journal modes.
+            time.sleep(0.05)
 
 
 class Store:
@@ -95,26 +109,29 @@ class Store:
         self._lock = threading.RLock()
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False, timeout=5)
         self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys=ON")
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("PRAGMA synchronous=FULL")
-        version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version == 0:
-            if self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchone():
-                self.db.close()
-                raise StorageError("Unrecognized existing database; refusing to migrate")
-            self.db.executescript(SCHEMA)
-        elif version != 1:
-            self.db.close()
-            raise StorageError("Unsupported database schema")
-        if mode is not None:
-            try:
+        try:
+            self.db.execute("PRAGMA foreign_keys=ON")
+            with self.transaction() as db:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                if version == 0:
+                    if db.execute("SELECT name FROM sqlite_schema").fetchone():
+                        raise StorageError("Unrecognized existing database; refusing to migrate")
+                    for statement in SCHEMA.strip().split(";\n"):
+                        db.execute(statement)
+                elif version != 1:
+                    raise StorageError("Unsupported database schema")
+            enable_wal(self.db)
+            self.db.execute("PRAGMA synchronous=FULL")
+            if mode is not None:
                 self.assert_mode(mode)
-            except BaseException:
-                self.db.close()
-                raise
+        except sqlite3.DatabaseError:
+            self.db.close()
+            raise StorageError("Cannot initialize the private state database") from None
+        except BaseException:
+            self.db.close()
+            raise
 
-    def assert_mode(self, mode: str) -> None:
+    def assert_mode(self, mode: str, *, register: bool = True) -> None:
         if mode not in {"live", "simulation"}:
             raise StorageError("Unknown state mode")
         with self.transaction() as db:
@@ -129,7 +146,8 @@ class Store:
                 bindings = db.execute("SELECT 1 FROM bindings").fetchone()
                 if (mode == "live" and simulated) or (mode == "simulation" and (real or bindings)):
                     raise StorageError("Existing state cannot be assigned this mode")
-                db.execute("INSERT INTO metadata VALUES('state_mode',?)", (mode,))
+                if register:
+                    db.execute("INSERT INTO metadata VALUES('state_mode',?)", (mode,))
 
     def close(self) -> None:
         self.db.close()

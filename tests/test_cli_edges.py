@@ -55,6 +55,14 @@ def test_cli_enrollment_revocation_backup_and_reconciliation(command, settings, 
 def test_cli_phone_readiness_checks_every_private_destination(command, settings, capsys):
     assert command("check-config", "--live") == 0
     assert command("check-config", "--modem") == 2
+    settings.env.update(
+        {
+            "PHONE_H1_CONFIRMED": "true",
+            "MODEM_AUDIO_RATE": "8000",
+            "PHONE_INGRESS_ID": "dedicated",
+        }
+    )
+    assert command("check-config", "--modem") == 2
     with Store(settings.state_dir):
         pass
     assert command("check-config", "--modem") == 2
@@ -65,6 +73,67 @@ def test_cli_phone_readiness_checks_every_private_destination(command, settings,
     assert command("check-config", "--modem") == 0
     assert command("status") == 0
     assert "synthetic-key" not in capsys.readouterr().out
+
+
+def test_worker_preflight_checks_effective_state_path_and_local_token_format(
+    command,
+    settings,
+    tmp_path,
+):
+    root = str(settings.state_dir)
+    assert command("check-config", "--worker", "--expect-state-dir", root) == 0
+    assert command("check-config", "--worker", "--expect-state-dir", str(tmp_path / "other")) == 2
+    settings.env["TELEGRAM_BOT_TOKEN"] = "unsafe/path"
+    assert command("check-config", "--worker", "--expect-state-dir", root) == 2
+    settings.env["TELEGRAM_BOT_TOKEN"] = "synthetic-token"
+    settings.env["ADMIN_TELEGRAM_CHAT_ID"] = "-100000"
+    assert command("check-config", "--worker") == 2
+
+
+def test_worker_preflight_rejects_simulation_state_without_relabelling(command, settings):
+    with Store(settings.state_dir, mode="simulation"):
+        pass
+    assert command("check-config", "--worker") == 2
+    with Store(settings.state_dir, mode="simulation"):
+        pass
+
+
+def test_worker_preflight_keeps_existing_unregistered_live_state_unmodified(
+    command,
+    settings,
+):
+    with Store(settings.state_dir) as store:
+        store.create_call("synthetic")
+    assert command("check-config", "--worker") == 0
+    with Store(settings.state_dir) as store:
+        assert not store.db.execute("SELECT value FROM metadata WHERE key='state_mode'").fetchone()
+
+
+def test_worker_preflight_rejects_a_state_database_symlink(command, monkeypatch):
+    from pathlib import Path
+
+    is_symlink = Path.is_symlink
+    monkeypatch.setattr(
+        Path, "is_symlink", lambda value: value.name == "secretary.sqlite3" or is_symlink(value)
+    )
+    assert command("check-config", "--worker") == 2
+
+
+def test_worker_preflight_refuses_a_conflicting_explicit_chat_without_changing_binding(
+    settings,
+    monkeypatch,
+):
+    from dataclasses import replace
+
+    with Store(settings.state_dir, mode="live") as store:
+        enrollment = Enrollment(store, settings.family)
+        enrollment.claim(enrollment.invite("member_a"), "101")
+    first, *rest = settings.family.profiles
+    family = replace(settings.family, profiles=(replace(first, telegram_chat_id="102"), *rest))
+    monkeypatch.setattr(cli.Settings, "load", lambda *args: replace(settings, family=family))
+    assert cli.main(["check-config", "--worker"]) == 2
+    with Store(settings.state_dir, mode="live") as store:
+        assert store.db.execute("SELECT chat_id FROM bindings").fetchone()[0] == "101"
 
 
 def test_cli_status_without_state_and_process_without_jobs(command, settings, capsys):

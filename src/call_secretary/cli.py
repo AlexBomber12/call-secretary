@@ -23,7 +23,11 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     check = sub.add_parser("check-config", help="Validate settings without network requests")
     check.add_argument("--live", action="store_true")
-    check.add_argument("--modem", action="store_true")
+    check.add_argument("--modem", action="store_true", help="Check phone startup configuration")
+    check.add_argument("--worker", action="store_true", help="Check Telegram worker configuration")
+    check.add_argument(
+        "--expect-state-dir", type=Path, help="Require this effective state directory"
+    )
     sub.add_parser("status", help="Show readiness, never secrets or transcript contents")
     sub.add_parser("phone-run", help="Run accepted dedicated hardware; requires explicit H1 gate")
     modem = sub.add_parser("modem-inspect", help="List ports, or inspect one explicit device")
@@ -257,19 +261,39 @@ def main(argv: list[str] | None = None) -> int:
             cid = asyncio.run(run_microphone(settings, args.profile))
             print(json.dumps({"call_id": cid, "status": "finished"}))
             return 0
-        if args.command == "check-config" and (args.live or args.modem):
-            settings.validate_live(modem=args.modem)
+        if args.command == "check-config":
+            if args.expect_state_dir is not None and settings.state_dir != args.expect_state_dir:
+                raise ConfigError("Effective state directory differs from the requested path")
+            if args.live or args.modem:
+                settings.validate_live(modem=args.modem)
             if args.modem:
+                from call_secretary.phone import PhoneOptions
+
+                PhoneOptions.load(settings)
+            if args.worker or args.modem:
+                from call_secretary.config import chat_id
                 from call_secretary.storage import Store
                 from call_secretary.summaries import destination
+                from call_secretary.telegram import Enrollment, validate_token
 
-                if not settings.state_dir.exists():
+                settings.require("TELEGRAM_BOT_TOKEN")
+                validate_token(settings.env["TELEGRAM_BOT_TOKEN"])
+                chat_id(settings.env.get("ADMIN_TELEGRAM_CHAT_ID"), "Operator chat")
+                database = settings.state_dir / "secretary.sqlite3"
+                if settings.state_dir.is_symlink() or database.is_symlink():
+                    raise ConfigError("Use a private state directory without symlinks")
+                if database.exists():
+                    with Store(settings.state_dir) as store:
+                        store.assert_mode("live", register=False)
+                        Enrollment(store, settings.family).validate_explicit_destinations()
+                        if args.modem and not all(
+                            destination(store, p) for p in settings.family.profiles
+                        ):
+                            raise ConfigError(
+                                "Enroll every enabled family profile before phone service"
+                            )
+                elif args.modem:
                     raise ConfigError("Enroll Telegram recipients before phone service")
-                with Store(settings.state_dir) as store:
-                    if not all(destination(store, p) for p in settings.family.profiles):
-                        raise ConfigError(
-                            "Enroll every enabled family profile before phone service"
-                        )
         if args.command == "status":
             from call_secretary.budget import Ledger, billing_status
             from call_secretary.health import snapshot
@@ -312,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "configuration": "valid",
                     "profiles": len(settings.family.profiles),
-                    "mode": "simulation",
+                    "mode": "live" if args.live or args.modem or args.worker else "simulation",
                     "phone_service": "not_started",
                     "audio_recording": False,
                 },
