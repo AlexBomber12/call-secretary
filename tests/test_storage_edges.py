@@ -1,12 +1,76 @@
+import multiprocessing
 import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from call_secretary import storage
 from call_secretary.storage import StorageError, Store
+
+
+def initialize_shared_database(directory, start, observed, outcomes):
+    original_connect = sqlite3.connect
+
+    class Connection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            cursor = super().execute(sql, *args)
+            if sql == "PRAGMA user_version" and not self.in_transaction:
+                # Synchronize the old read-before-lock behavior to expose its race.
+                observed.wait(4)
+            return cursor
+
+    def connect(*args, **kwargs):
+        return original_connect(*args, factory=Connection, **kwargs)
+
+    storage.sqlite3.connect = connect
+    try:
+        if not start.wait(10):
+            raise TimeoutError("test start gate")
+        with Store(directory, mode="live") as store:
+            store.create_call("synthetic")
+        outcomes.put("ok")
+    except Exception as exc:
+        outcomes.put(type(exc).__name__)
+    finally:
+        storage.sqlite3.connect = original_connect
+
+
+@pytest.mark.parametrize("preexisting_empty", [False, True])
+def test_two_processes_can_initialize_the_same_empty_private_database(tmp_path, preexisting_empty):
+    directory = tmp_path / "state"
+    if preexisting_empty:
+        directory.mkdir(mode=0o700)
+        path = directory / "secretary.sqlite3"
+        with sqlite3.connect(path) as db:
+            assert db.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        db.close()
+        path.chmod(0o600)
+
+    ctx = multiprocessing.get_context("spawn")
+    start, observed, outcomes = ctx.Event(), ctx.Barrier(2), ctx.Queue()
+    processes = [
+        ctx.Process(target=initialize_shared_database, args=(directory, start, observed, outcomes))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    try:
+        start.set()
+        assert [outcomes.get(timeout=15) for _ in processes] == ["ok", "ok"]
+        with Store(directory, mode="live") as store:
+            assert store.counts()["calls"] == 2
+            assert store.db.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert store.db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    finally:
+        for process in processes:
+            process.join(timeout=2)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+        outcomes.close()
 
 
 @pytest.mark.parametrize("leaf", ["state", "secretary.sqlite3"])
@@ -46,6 +110,47 @@ def test_database_creation_race_keeps_existing_file(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "os", SimpleNamespace(**{**vars(os), "open": race}))
     with Store(tmp_path / "state") as store:
         assert store.counts()["calls"] == 0
+
+
+@pytest.mark.parametrize("outcome", ["retry", "deadline", "permission", "no_wal"])
+def test_wal_initialization_only_retries_a_bounded_busy_error(monkeypatch, outcome):
+    db = Mock()
+    wait = Mock()
+    monkeypatch.setattr(
+        storage,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: 0 if not db.execute.called else 6 if outcome == "deadline" else 1,
+            sleep=wait,
+        ),
+    )
+    if outcome == "no_wal":
+        db.execute.return_value.fetchone.return_value = ("delete",)
+        with pytest.raises(StorageError, match="enable WAL"):
+            storage.enable_wal(db)
+    else:
+        error = sqlite3.OperationalError("synthetic error")
+        error.sqlite_errorcode = (
+            sqlite3.SQLITE_READONLY if outcome == "permission" else sqlite3.SQLITE_BUSY
+        )
+        db.execute.side_effect = [error, Mock(fetchone=lambda: ("wal",))]
+        if outcome == "retry":
+            storage.enable_wal(db)
+        else:
+            with pytest.raises(sqlite3.OperationalError):
+                storage.enable_wal(db)
+    assert db.execute.call_count == (2 if outcome == "retry" else 1)
+    assert wait.call_count == int(outcome == "retry")
+
+
+def test_corrupt_database_is_rejected_with_sanitized_error(tmp_path):
+    directory = tmp_path / "state"
+    directory.mkdir(mode=0o700)
+    path = directory / "secretary.sqlite3"
+    path.write_bytes(b"synthetic invalid SQLite file")
+    path.chmod(0o600)
+    with pytest.raises(StorageError, match="initialize"):
+        Store(directory)
 
 
 @pytest.mark.parametrize("schema", ["unknown-table", "future-version"])

@@ -9,7 +9,37 @@ apt-get install -y -qq python3.12-venv libportaudio2 espeak-ng psmisc systemd pa
 # command dispatch is captured because there is no init/service/device in CI.
 cat >/usr/local/bin/systemctl <<'SH'
 #!/bin/sh
+set -eu
+state=/tmp/secretary-service-state
+mkdir -p "$state"
 printf '%s\n' "$*" >> /tmp/secretary-service-actions
+action=$1
+shift
+case "$action" in
+  is-active|is-enabled)
+    [ "$1" = '--quiet' ] && shift
+    test -f "$state/$action-$1"
+    ;;
+  stop)
+    for unit in "$@"; do rm -f -- "$state/is-active-$unit"; done
+    ;;
+  enable)
+    now=false
+    if [ "$1" = '--now' ]; then now=true; shift; fi
+    touch "$state/is-enabled-$1"
+    if "$now"; then
+      if [ -f /tmp/secretary-fail-start ] &&
+         [ "$(readlink /opt/call-secretary/current)" = /opt/call-secretary/releases/ci-two ]; then
+        exit 1
+      fi
+      touch "$state/is-active-$1"
+    fi
+    ;;
+  disable) rm -f -- "$state/is-enabled-$1" ;;
+  start) touch "$state/is-active-$1" ;;
+  daemon-reload) : ;;
+  *) exit 2 ;;
+esac
 SH
 chmod 0755 /usr/local/bin/systemctl
 bash /source/deploy/install-server.sh /source ci-one
@@ -28,18 +58,43 @@ runuser -u call-secretary -- "$exe" "${args[@]}" check-config
 runuser -u call-secretary -- /opt/call-secretary/releases/ci-one/venv/bin/python -c \
   'from call_secretary.fallback_audio import local_phrase; pcm=local_phrase(); assert 48000 < len(pcm) < 768000'
 if runuser -u call-secretary -- "$exe" "${args[@]}" phone-run; then exit 1; fi
+# A token from the calling shell cannot make a different systemd environment valid.
+sed -i '/^TELEGRAM_BOT_TOKEN=/d' /etc/call-secretary/secretary.env
+if TELEGRAM_BOT_TOKEN=synthetic-token bash /source/deploy/activate-release.sh ci-one; then exit 1; fi
+! grep -q '^stop ' /tmp/secretary-service-actions
+test ! -e /opt/call-secretary/current
+printf '\nTELEGRAM_BOT_TOKEN=synthetic-token\n' >> /etc/call-secretary/secretary.env
 bash /source/deploy/activate-release.sh ci-one
 runuser -u call-secretary -- /opt/call-secretary/current/venv/bin/python -c \
   'from pathlib import Path; from call_secretary.storage import Store; s=Store(Path("/var/lib/call-secretary")); c=s.create_call("synthetic"); s.end_call(c); s.close()'
 bash /source/deploy/install-server.sh /source ci-two
+# Reject a bad effective configuration before stopping a running service.
+sed -i 's|^STATE_DIR=.*|STATE_DIR=/var/lib/incorrect-state|' /etc/call-secretary/secretary.env
+before=$(grep -c '^stop ' /tmp/secretary-service-actions)
+if bash /source/deploy/activate-release.sh ci-two; then exit 1; fi
+test "$(grep -c '^stop ' /tmp/secretary-service-actions)" = "$before"
+test "$(readlink /opt/call-secretary/current)" = /opt/call-secretary/releases/ci-one
+sed -i 's|^STATE_DIR=.*|STATE_DIR=/var/lib/call-secretary|' /etc/call-secretary/secretary.env
+
+# A failed start restores the old link and worker without erasing the active database.
+touch /tmp/secretary-fail-start
+if bash /source/deploy/activate-release.sh ci-two; then exit 1; fi
+rm -f /tmp/secretary-fail-start
+test "$(readlink /opt/call-secretary/current)" = /opt/call-secretary/releases/ci-one
+systemctl is-enabled --quiet call-secretary-worker.service
+systemctl is-active --quiet call-secretary-worker.service
+runuser -u call-secretary -- /opt/call-secretary/current/venv/bin/python -c \
+  'from pathlib import Path; from call_secretary.storage import Store; s=Store(Path("/var/lib/call-secretary")); assert s.counts()["calls"] == 1 and s.counts()["summary_pending"] == 1; s.close()'
+test "$(find /var/lib/call-secretary/backups -name '*.sqlite3' | wc -l)" = 1
+
 bash /source/deploy/activate-release.sh ci-two
 test "$(readlink /opt/call-secretary/current)" = /opt/call-secretary/releases/ci-two
-test "$(find /var/lib/call-secretary/backups -name '*.sqlite3' | wc -l)" = 1
+test "$(find /var/lib/call-secretary/backups -name '*.sqlite3' | wc -l)" = 2
 bash /source/deploy/activate-release.sh ci-one
 test "$(readlink /opt/call-secretary/current)" = /opt/call-secretary/releases/ci-one
-test "$(find /var/lib/call-secretary/backups -name '*.sqlite3' | wc -l)" = 2
+test "$(find /var/lib/call-secretary/backups -name '*.sqlite3' | wc -l)" = 3
 if bash /source/deploy/activate-release.sh ci-one --phone; then exit 1; fi
-! grep -E 'enable.*phone|ModemManager|sms-gateway' /tmp/secretary-service-actions
+! grep -E '^enable .*phone|ModemManager|sms-gateway' /tmp/secretary-service-actions
 systemd-analyze verify --man=no /etc/systemd/system/call-secretary-{phone,worker}.service
 runuser -u call-secretary -- "$exe" "${args[@]}" status
-echo 'DEPLOYMENT_SMOKE_OK: install, gate, real local prompt, upgrade, backup, rollback and unit verification'
+echo 'DEPLOYMENT_SMOKE_OK: install, effective config, failed startup rollback, state, and units'

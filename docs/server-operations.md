@@ -93,9 +93,9 @@ After H1, explicitly include the phone service:
 bash deploy/activate-release.sh RELEASE_ID --phone
 ```
 
-Activation validates configuration, stops only this application's services, backs up an existing state database as its service user, switches the `current` release symlink and enables/starts the requested units. Never enable family forwarding before actual acceptance. The local gate does not constitute H1.
+Activation checks the candidate from the service working directory, using the private environment file and the effective state path. It validates Telegram settings, enrollment conflicts, and the H1 configuration when `--phone` is selected. These checks happen before any unit is stopped. The script then backs up the SQLite database, switches `current` atomically, and checks the requested units started. A detected failure restores the previous link and the units' previous startup state. Runtime health and hardware still require live acceptance.
 
-For rollback, invoke the same activation script with the previous release ID and the desired `--phone` mode. Retain previous releases and backups. This release keeps SQLite schema version 1; future incompatible migrations need a separately reviewed restore procedure. Do not restore a backup over a running service. A restore can repeat notifications/lose post-backup updates; review fixed destinations and usage before resuming. Unknown costs require billing reconciliation, not automatic zeroing.
+For a planned rollback, use a previously staged release that supports the same preflight options and the desired `--phone` mode. Automatic rollback restores the previous release directly. Retain previous releases and backups. This release keeps SQLite schema version 1; future incompatible migrations need a separately reviewed restore procedure. Do not restore a backup over a running service. A restore can repeat notifications/lose post-backup updates; review fixed destinations and usage before resuming. Unknown costs require billing reconciliation, not automatic zeroing.
 
 ```sh
 systemctl status call-secretary-phone call-secretary-worker
