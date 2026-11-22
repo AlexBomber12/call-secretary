@@ -77,8 +77,11 @@ def check_device(device: str) -> None:
             raise ModemError("Select an explicit COM port")
         return
     path = Path(device)
-    if not str(path).startswith("/dev/serial/by-id/") or not path.is_symlink():
-        raise ModemError("Select a stable /dev/serial/by-id device")
+    if (
+        not str(path).startswith(("/dev/serial/by-id/", "/dev/serial/by-path/"))
+        or not path.is_symlink()
+    ):
+        raise ModemError("Select a stable /dev/serial device")
     if not path.resolve().is_char_device():
         raise ModemError("Selected device is not a character device")
     fuser = shutil.which("fuser")
@@ -91,14 +94,14 @@ def check_device(device: str) -> None:
         raise ModemError("Cannot establish port ownership")
 
 
-def open_serial(device: str, *, baudrate: int = 115200) -> Any:
+def open_serial(device: str, *, baudrate: int = 115200, timeout: float = 0.1) -> Any:
     import serial
 
     try:
         check_device(device)
     except (OSError, subprocess.TimeoutExpired):
         raise ModemError("Cannot establish port ownership") from None
-    options: dict[str, Any] = {"baudrate": baudrate, "timeout": 0.1, "write_timeout": 1}
+    options: dict[str, Any] = {"baudrate": baudrate, "timeout": timeout, "write_timeout": 1}
     if os.name != "nt":
         options["exclusive"] = True
     try:

@@ -28,6 +28,9 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("phone-run", help="Run accepted dedicated hardware; requires explicit H1 gate")
     modem = sub.add_parser("modem-inspect", help="List ports, or inspect one explicit device")
     modem.add_argument("--device")
+    pcm = sub.add_parser("modem-audio-test", help="Answer one dedicated SIM7600 test call")
+    pcm.add_argument("--control", required=True, help="Verified stable SIM7600 control path")
+    pcm.add_argument("--audio", required=True, help="Verified stable SIM7600 PCM path")
     sub.add_parser("hardware-checklist", help="Print unverified H1/H2 acceptance checklist")
     prototype = sub.add_parser("voice-prototype", help="Paid microphone test, no phone modem")
     prototype.add_argument("--profile", help="Omit to ask the caller for a family recipient")
@@ -77,6 +80,13 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 result = inspect(args.device) if args.device else {"ports": inventory()}
             print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if args.command == "modem-audio-test":
+            from call_secretary.phone import modem_audio_test
+            from call_secretary.serial_pcm import VoicePorts
+
+            size = asyncio.run(modem_audio_test(VoicePorts(args.control, args.audio)))
+            print(json.dumps({"pcm_bytes": size, "audible_quality": "operator_check_required"}))
             return 0
         settings = Settings.load(args.profiles, args.env_file)
         if args.command == "phone-run":

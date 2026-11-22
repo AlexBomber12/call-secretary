@@ -73,6 +73,33 @@ def test_phone_options_support_distinct_explicit_capture_and_playback(settings):
     assert options.audio == AudioSpec("dedicated input", "dedicated output", 8000)
 
 
+@pytest.mark.parametrize("rate", ["8000", "16000"])
+def test_serial_pcm_does_not_require_sounddevice_and_requires_8khz(settings, rate):
+    settings = replace(
+        accepted(settings),
+        env=accepted(settings).env
+        | {"MODEM_PCM_DEVICE": "voice", "MODEM_AUDIO_DEVICE": "", "MODEM_AUDIO_RATE": rate},
+    )
+    settings.validate_live(modem=True)
+    if rate == "8000":
+        options = phone.PhoneOptions.load(settings)
+        assert options.pcm == phone.VoicePorts(settings.env["MODEM_CONTROL_DEVICE"], "voice")
+    else:
+        with pytest.raises(ConfigError, match="8 kHz"):
+            phone.PhoneOptions.load(settings)
+
+
+def test_serial_control_uses_a_verified_port_before_probing_the_model(monkeypatch):
+    port, control = Mock(), Mock()
+    opened = Mock(return_value=port)
+    initialize = Mock(return_value=control)
+    monkeypatch.setattr(phone.VoicePorts, "open", opened)
+    monkeypatch.setattr(phone, "initialize_control", initialize)
+    assert phone.open_pcm_control(phone.VoicePorts("control", "voice")) is control
+    opened.assert_called_once_with()
+    initialize.assert_called_once_with(port)
+
+
 @pytest.mark.parametrize("model", [["SIMCOM_SIM7600E-H"], ["Quectel EC25"]])
 def test_opener_probes_model_before_call_commands_and_closes_rejected_hardware(monkeypatch, model):
     port, control = Mock(), Mock()
@@ -124,6 +151,57 @@ class Control:
             raise ModemError("stale call")
         self.hung.append(token)
         self.current = None
+
+
+@pytest.mark.parametrize("disable_failure", [False, True])
+def test_serial_audio_is_activated_after_answer_and_closed_for_local_fallback(
+    settings, monkeypatch, disable_failure
+):
+    control = Control()
+    timeline = []
+
+    def enable(token):
+        assert token == OBSERVED.token
+        assert control.current.state == 0
+        timeline.append("enable")
+
+    def disable():
+        assert control.current is None
+        assert all(endpoint.closed for endpoint in endpoints)
+        timeline.append("disable")
+        if disable_failure:
+            raise ModemError("synthetic disconnect")
+
+    control.enable_pcm, control.disable_pcm = enable, disable
+    options = replace(OPTIONS, pcm=phone.VoicePorts("control", "voice"))
+    endpoints = [Endpoint(), Endpoint()]
+
+    async def open_pcm(ports):
+        assert ports == options.pcm
+        timeline.append("open")
+        if timeline.count("open") == 2:
+            assert endpoints[0].closed
+            return endpoints[1]
+        return endpoints[0]
+
+    @asynccontextmanager
+    async def unavailable(key, model):
+        raise ConnectionError("synthetic provider outage")
+        yield
+
+    monkeypatch.setattr(phone, "open_pcm_audio", open_pcm)
+    phrase = bytes(960)
+    with Store(settings.state_dir, mode="live") as store:
+        asyncio.run(
+            phone.handle_call(
+                settings, store, options, control, OBSERVED, phrase, connector=unavailable
+            )
+        )
+        if disable_failure:
+            assert snapshot(store)["modem"]["state"] == "unavailable"
+    assert timeline == ["enable", "open", "open", "disable"]
+    assert endpoints[1].output == [phrase]
+    assert control.hung == [OBSERVED.token]
 
 
 @pytest.mark.parametrize(
@@ -555,12 +633,15 @@ def test_real_at_controller_realtime_and_workers_form_one_offline_phone_journey(
         "fatal_close",
         "close_error",
         "reconnect",
+        "serial",
         "not_enrolled",
         "disabled",
     ],
 )
 def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode):
     settings = accepted(settings)
+    if mode == "serial":
+        settings = replace(settings, env=settings.env | {"MODEM_PCM_DEVICE": "voice"})
     if mode == "disabled":
         settings = replace(
             settings,
@@ -628,6 +709,7 @@ def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode)
             return "synthetic-call-id"
 
         monkeypatch.setattr(phone, "open_control", opener)
+        monkeypatch.setattr(phone, "open_pcm_control", opener)
         monkeypatch.setattr(phone, "handle_call", handle)
         if mode in {"not_enrolled", "disabled"}:
             with pytest.raises(ConfigError):
@@ -645,6 +727,8 @@ def test_service_sigterm_reconnect_and_safe_startup(settings, monkeypatch, mode)
         else:
             await asyncio.wait_for(phone.run_phone(settings), 2)
             assert len(attempts) == (2 if mode == "reconnect" else 1)
+            if mode == "serial":
+                assert attempts == [phone.VoicePorts(settings.env["MODEM_CONTROL_DEVICE"], "voice")]
             with Store(settings.state_dir) as store:
                 assert snapshot(store)["modem"]["state"] == "stopped"
         removed.assert_called_once()
