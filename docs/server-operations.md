@@ -55,6 +55,14 @@ The converter uses Python 3.12 `audioop.ratecv` state across frames and resets o
 
 The ten-minute timer includes audio opening, answering, API connection and dialogue. The caller/replacement watcher remains active during the local phrase. Cleanup/hangup adds bounded control/worker latency; measure the actual network-side cutoff during H1. A crash/power loss cannot guarantee an immediate physical hangup: after restart, an already active unowned call is refused until it ends, rather than adopted or globally disconnected. Summary recovery retains its partial text and unknown bill.
 
+## Reports and Telegram delivery
+
+The report contains the caller's request, material clarifications and expected action in the recipient's language. It uses continuous prose and identifies both the network caller ID and any callback contact provided by the caller. Silence, incomplete recognition, and an unavailable summary have distinct messages. Recognized words displayed after a summary failure remain in their original language.
+
+Reports keep their chat and call ID across retries. The worker retries transient Telegram startup failures and respects the delay in a 429 response. An active webhook or permanent authentication failure stops the worker and leaves the queue intact. A lost success response can produce a duplicate with the same call ID. [Telegram Bot API](https://core.telegram.org/bots/api)
+
+Set `ADMIN_TELEGRAM_CHAT_ID` to the operator's positive private chat ID to enable alerts for unresolved or disputed recipients. The bot checks the chat before sending. Alerts contain the call time, routing status, and call ID. The conversation stays in private application state.
+
 ## Stage installation, without activating phone service
 
 The scripts are for Ubuntu with systemd, **not for execution on the current Windows development host**. Use a reviewed public source checkout/sdist containing `deploy/`. Nothing reads private vault material or the SMS gateway configuration.

@@ -912,7 +912,7 @@ def test_invalid_paid_policy_does_not_disable_free_error_reports_or_enrollment(
         clients.append(value)
         return value
 
-    async def workers(store, family, api, summary):
+    async def workers(store, family, api, summary, *, operator_chat):
         assert summary.provider is None and summary.rates is None
         enrollment = Enrollment(store, family)
         enrollment.claim(enrollment.invite("member_a"), "101")
