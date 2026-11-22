@@ -792,3 +792,17 @@ def test_fatal_audio_during_realtime_skips_fallback_and_propagates(settings):
             assert snapshot(store)["audio"]["state"] == "unavailable"
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("close_error", [False, True])
+def test_usb_error_during_model_probe_stays_in_reconnect_error_class(monkeypatch, close_error):
+    port = Mock()
+    if close_error:
+        port.close.side_effect = OSError("private close detail")
+    monkeypatch.setattr(phone, "open_serial", lambda device: port)
+    probe = Mock(side_effect=OSError("private USB detail"))
+    monkeypatch.setattr(phone, "at_query", probe)
+    with pytest.raises(ModemError) as error:
+        phone.open_control("synthetic")
+    assert "private" not in str(error.value)
+    port.close.assert_called_once()

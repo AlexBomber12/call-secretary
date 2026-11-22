@@ -411,3 +411,139 @@ def test_late_first_caller_metadata_preserves_the_same_call():
     later = calls.poll()
     assert later.token == first.token
     assert later.number == "+39000000123"
+
+
+@pytest.mark.parametrize("failure", [b"ERROR", b"+CME ERROR: 10"])
+def test_owned_call_survives_one_clear_snapshot_rejection(failure):
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [b"OK\r\n"],
+            [snapshot(0), b"OK\r\n"],
+            [failure + b"\r\n"],
+            [snapshot(0), b"OK\r\n"],
+            [b"OK\r\n"],
+            [b"OK\r\n"],
+        ]
+    )
+    control = CallControl(ATChannel(port))
+    token = control.poll().token
+    control.answer(token)
+    assert control.poll().token == token
+    assert control.hangup(token) is None
+    assert port.writes.count(b"AT+CHUP\r") == 1
+
+
+@pytest.mark.parametrize(
+    "hints",
+    [[b"NO CARRIER\r\n"], [b"RING\r\n"], [b"VOICE CALL: BEGIN\r\n"]],
+)
+def test_boundary_during_snapshot_retry_cannot_reuse_old_token(hints):
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [b"OK\r\n"],
+            [snapshot(0), b"OK\r\n"],
+            [b"ERROR\r\n"],
+            [*hints, snapshot(0), b"OK\r\n"],
+            [snapshot(0), b"OK\r\n"],
+        ]
+    )
+    control = CallControl(ATChannel(port))
+    token = control.poll().token
+    control.answer(token)
+    assert control.poll().token == token
+    with pytest.raises(ModemError):
+        control.hangup(token)
+    with pytest.raises(ModemError):
+        control.hangup(token)
+    assert not any(command.startswith((b"AT+CHUP", b"AT+CHLD=")) for command in port.writes)
+
+
+@pytest.mark.parametrize("caller_waiting", [False, True])
+@pytest.mark.parametrize("rejection", [False, True])
+def test_second_incoming_keeps_active_owner_and_requires_indexed_hangup(caller_waiting, rejection):
+    waiting = snapshot(5, identity=3)
+    multi = (
+        [waiting, snapshot(0, identity=2)]
+        if caller_waiting
+        else [b"RING\r\n", snapshot(0, identity=2)]
+    )
+    results = [[b"ERROR\r\n"]] if rejection else [[b"OK\r\n"], [b"OK\r\n"]]
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [snapshot(identity=2), b"OK\r\n"],
+            [snapshot(identity=2), b"OK\r\n"],
+            [b"OK\r\n"],
+            [snapshot(0, identity=2), b"OK\r\n"],
+            [*multi, b"OK\r\n"],
+            [snapshot(0, identity=2), b"OK\r\n"],
+            *results,
+        ]
+    )
+    control = CallControl(ATChannel(port))
+    token = control.poll().token
+    control.answer(token)
+    assert control.poll().token == token
+    assert control.poll().token == token
+    if rejection:
+        with pytest.raises(CommandRejected):
+            control.hangup(token)
+    else:
+        assert control.hangup(token) is None
+    assert port.writes.count(b"AT+CHLD=12\r") == 1
+    assert b"AT+CHUP\r" not in port.writes
+
+
+@pytest.mark.parametrize(
+    "owned_id, peer",
+    [
+        (12, snapshot(5, identity=3)),
+        (2, snapshot(5, identity=2)),
+        (2, snapshot(0, identity=3)),
+        (2, b"+CLCC: 3,1,5,1,0\r\n"),
+        (2, b"+CLCC: 3,1,5,0,1\r\n"),
+    ],
+)
+def test_hangup_refuses_unaddressable_or_unsafe_multiple_calls(owned_id, peer):
+    ring = snapshot(identity=owned_id)
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [ring, b"OK\r\n"],
+            [ring, b"OK\r\n"],
+            [b"OK\r\n"],
+            [snapshot(0, identity=owned_id), b"OK\r\n"],
+            [snapshot(0, identity=owned_id), peer, b"OK\r\n"],
+        ]
+    )
+    control = CallControl(ATChannel(port))
+    token = control.poll().token
+    control.answer(token)
+    assert control.poll().token == token
+    with pytest.raises(ModemError):
+        control.hangup(token)
+    assert not any(command.startswith((b"AT+CHUP", b"AT+CHLD=")) for command in port.writes)
+
+
+def test_hangup_cannot_reject_a_call_that_was_never_answered():
+    ring = [snapshot(), b"OK\r\n"]
+    port = Port([[b"OK\r\n"], ring, ring])
+    control = CallControl(ATChannel(port))
+    call = control.poll()
+    with pytest.raises(ModemError):
+        control.hangup(call.token)
+    assert b"AT+CHUP\r" not in port.writes
+
+
+def test_partial_snapshot_rejection_closes_channel_instead_of_retrying():
+    port = Port([[b"OK\r\n"], [snapshot(), b"ERROR\r\n"]])
+    control = CallControl(ATChannel(port))
+    with pytest.raises(ModemError, match="indeterminate"):
+        control.poll()
+    assert port.closed and port.writes.count(b"AT+CLCC\r") == 1

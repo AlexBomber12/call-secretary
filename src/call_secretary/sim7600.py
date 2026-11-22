@@ -16,7 +16,8 @@ from typing import Protocol
 from call_secretary.modem import ModemError
 from call_secretary.routing import Incoming
 
-COMMANDS = frozenset({"AT", "AT+CLCC=0", "AT+CLCC", "ATA", "AT+CHUP"})
+INDEXED_RELEASE = {index: f"AT+CHLD=1{index}" for index in range(1, 10)}
+COMMANDS = frozenset({"AT", "AT+CLCC=0", "AT+CLCC", "ATA", "AT+CHUP", *INDEXED_RELEASE.values()})
 TERMINAL = frozenset({"NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE"})
 
 
@@ -140,6 +141,8 @@ class ATChannel:
                     if line == "OK":
                         return tuple(lines)
                     if line == "ERROR" or line.startswith(("+CME ERROR:", "+CMS ERROR:")):
+                        if lines:
+                            raise ModemError("Modem rejected a partial snapshot")
                         raise CommandRejected("Modem rejected the command")
                     if line in TERMINAL:
                         self._event(line)
@@ -180,6 +183,7 @@ class CallControl:
         self.channel = channel
         self._current: ObservedCall | None = None
         self._owned = False
+        self._other_call = False
         with channel._lock:
             if channel._claimed:
                 raise ModemError("A controller already owns this modem channel")
@@ -196,21 +200,48 @@ class CallControl:
             try:
                 return self._poll()
             except ModemError:
-                self._current, self._owned = None, False
+                self._forget_call()
                 raise
 
+    def _forget_call(self) -> None:
+        self._current, self._owned, self._other_call = None, False, False
+
     def _poll(self) -> ObservedCall | None:
-        calls = [parse_call(line) for line in self.channel.execute("AT+CLCC")]
+        retried = False
+        try:
+            response = self.channel.execute("AT+CLCC")
+        except CommandRejected:
+            # CLCC is read-only, and a rejection without rows preserves framing.
+            retried = True
+            response = self.channel.execute("AT+CLCC")
+        calls = [parse_call(line) for line in response]
         hints = self.channel.events()
         ended_hint = any(
             line in TERMINAL or (line.startswith("VOICE CALL") and "END" in line) for line in hints
         )
         if not calls:
-            self._current, self._owned = None, False
+            self._forget_call()
             return None
-        if len(calls) != 1:
-            raise ModemError("Multiple calls are outside the single-channel pilot")
-        call = calls[0]
+        if len(calls) == 1:
+            call = calls[0]
+        else:
+            active = [row for row in calls if row.state == 0]
+            waiting = [
+                row
+                for row in calls
+                if row.state in {4, 5}
+                and row.direction == 1
+                and row.mode == 0
+                and not row.multiparty
+            ]
+            if (
+                len(calls) != 2
+                or len(active) != 1
+                or len(waiting) != 1
+                or active[0].identity == waiting[0].identity
+            ):
+                raise ModemError("Cannot distinguish an active call and one waiting caller")
+            call = active[0]
         if call.direction != 1 or call.mode != 0 or call.multiparty or call.state not in {0, 4}:
             raise ModemError("Not a supported incoming voice call")
         previous = self._current
@@ -218,6 +249,14 @@ class CallControl:
             previous and previous.number and call.number and previous.number != call.number
         )
         if call.state == 0:
+            ringing_hint = any(
+                line == "RING" or line.startswith(("+CRING:", "+CCWA:")) for line in hints
+            )
+            begin_hint = any(line.startswith("VOICE CALL") and "BEGIN" in line for line in hints)
+            if (retried and (ended_hint or ringing_hint or begin_hint)) or (
+                ended_hint and (ringing_hint or begin_hint)
+            ):
+                raise ModemError("Cannot confirm call continuity after a boundary indication")
             if (
                 previous is None
                 or previous.identity != call.identity
@@ -225,6 +264,8 @@ class CallControl:
                 or changed_caller
             ):
                 raise ModemError("Will not adopt an existing active call")
+            # Once a second call has been observed, keep using indexed release for this token.
+            self._other_call |= len(calls) > 1 or ringing_hint
         elif (
             previous is None
             or previous.identity != call.identity
@@ -233,7 +274,7 @@ class CallControl:
             or changed_caller
         ):
             self._current = ObservedCall(str(uuid.uuid4()), call.identity, 4, call.number)
-            self._owned = False
+            self._owned = self._other_call = False
         assert self._current is not None
         self._current = replace(
             self._current, state=call.state, number=call.number or self._current.number
@@ -256,6 +297,12 @@ class CallControl:
 
     def hangup(self, token: str) -> ObservedCall | None:
         with self.channel._lock:
-            self._check(token)
-            self.channel.execute("AT+CHUP")
+            current = self._check(token)
+            if current.state != 0:
+                raise ModemError("Cannot release a call before confirming it is active")
+            command = INDEXED_RELEASE.get(current.identity) if self._other_call else "AT+CHUP"
+            if command is None:
+                raise ModemError("Cannot release this call by index while another call may exist")
+            self.channel.execute(command)
+            self._forget_call()
             return self.poll()

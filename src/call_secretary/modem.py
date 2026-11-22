@@ -94,7 +94,10 @@ def check_device(device: str) -> None:
 def open_serial(device: str, *, baudrate: int = 115200) -> Any:
     import serial
 
-    check_device(device)
+    try:
+        check_device(device)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ModemError("Cannot establish port ownership") from None
     options: dict[str, Any] = {"baudrate": baudrate, "timeout": 0.1, "write_timeout": 1}
     if os.name != "nt":
         options["exclusive"] = True
