@@ -265,7 +265,7 @@ def test_call_lifecycle_limits_fallback_hangup_usb_and_billing(
         def __init__(self, socket, ep, call, *args):
             self.call = call
             self.input_bytes = 48000
-            self.usage_complete = True
+            self.usage_complete = outcome not in {"api", "deadline"}
             self.committed_items = {"caller"}
             self.transcribed_items = set() if outcome == "missing" else {"caller"}
 
@@ -324,25 +324,14 @@ def test_call_lifecycle_limits_fallback_hangup_usb_and_billing(
                 assert control.hung == [OBSERVED.token]
             if outcome != "audio":
                 assert endpoint.closed
-            if outcome in {
-                "connect",
-                "api",
-                "usb",
-                "hangup",
-                "hangup_late",
-                "replacement",
-            }:
-                assert call["voice_usage_complete"] == 0
-            if outcome == "deadline":
-                # Startup I/O can consume the deadline before any API attempt;
-                # only an actual attempt may leave usage unknown.
-                assert call["voice_usage_complete"] == int(not connects)
+            expected_complete = outcome != "api" and (outcome != "deadline" or not connects)
+            assert bool(call["voice_usage_complete"]) == expected_complete
             await SummaryWorker(store, family).process_one()
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("transcription", ["completed", "failed", "socket_lost", "early"])
+@pytest.mark.parametrize("transcription", ["completed", "failed", "socket_lost", "early", "billed"])
 def test_caller_hangup_keeps_late_committed_words_and_stops_voice_output(settings, transcription):
     async def scenario():
         control = Control()
@@ -379,6 +368,26 @@ def test_caller_hangup_keeps_late_committed_words_and_stops_voice_output(setting
                     self.reported = True
                     control.current = None
                     await disconnected.wait()
+                    if transcription == "billed":
+                        self.inputs = iter(
+                            [
+                                {
+                                    "type": "conversation.item.input_audio_transcription.completed",
+                                    "item_id": "message",
+                                    "transcript": "Final synthetic instruction",
+                                }
+                            ]
+                        )
+                        return json.dumps(
+                            {
+                                "type": "response.done",
+                                "response": {
+                                    "id": "answer",
+                                    "status": "cancelled",
+                                    "usage": USAGE,
+                                },
+                            }
+                        )
                     if transcription == "socket_lost":
                         raise OSError("synthetic loss after caller hangup")
                     return json.dumps(
@@ -418,14 +427,22 @@ def test_caller_hangup_keeps_late_committed_words_and_stops_voice_output(setting
             )
             status = (
                 "caller_hangup"
-                if transcription in {"completed", "early"}
+                if transcription in {"completed", "early", "billed"}
                 else "caller_hangup_text_incomplete"
             )
-            assert store.call(cid)["status"] == status
+            call = store.call(cid)
+            assert call["status"] == status
+            assert bool(call["voice_usage_complete"]) == (transcription in {"early", "billed"})
             assert [row["text"] for row in store.transcript(cid)] == (
-                ["Final synthetic instruction"] if transcription == "completed" else []
+                ["Final synthetic instruction"] if transcription in {"completed", "billed"} else []
             )
             assert store.counts()["summary_pending"] == 1
+            assert await SummaryWorker(store, settings.family).process_one()
+            budget = store.db.execute(
+                "SELECT reserved,consumed,closed FROM budget_reservations WHERE call_id=?", (cid,)
+            ).fetchone()
+            assert budget["reserved"] > budget["consumed"]
+            assert bool(budget["closed"]) == (transcription in {"early", "billed"})
         assert endpoint.interrupted == (transcription != "early")
         assert endpoint.closed and not endpoint.output
         expected_events = (

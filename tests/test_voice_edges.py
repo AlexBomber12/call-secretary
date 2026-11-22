@@ -162,6 +162,29 @@ def test_incomplete_usage_and_malformed_tools_fail_closed(rates, changes, messag
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("outcome", ["missing_usage", "failed_with_usage", "debit_error"])
+def test_complete_usage_requires_a_successful_debit_for_terminal_responses(rates, outcome):
+    class Billing(Hooks):
+        async def usage(self, rid, usage):
+            if outcome == "debit_error":
+                raise OSError("synthetic accounting failure")
+            await super().usage(rid, usage)
+
+    async def scenario():
+        hooks = Billing()
+        voice = Realtime(Socket(), Endpoint(), hooks, rates, "p", [], "v")
+        await voice.request_response()
+        assert not voice.usage_complete
+        with pytest.raises(OSError if outcome == "debit_error" else VoiceError):
+            await voice.handle(
+                done(status="failed", usage=None if outcome == "missing_usage" else {})
+            )
+        assert voice.usage_complete == (outcome == "failed_with_usage")
+        assert len(hooks.usages) == int(outcome == "failed_with_usage")
+
+    asyncio.run(scenario())
+
+
 def test_completed_tools_update_profile_and_finish_after_playback(rates):
     class Tools(Hooks):
         async def tool(self, name, args):
@@ -307,9 +330,11 @@ def test_only_the_matching_cancel_race_is_recoverable(rates):
         assert voice.pending and voice.responses == 2
         error = {"code": "response_cancel_not_active", "event_id": cancelled["event_id"]}
         await voice.handle({"type": "error", "error": error})
-        assert voice.pending and voice.usage_complete
+        assert voice.pending and not voice.usage_complete
         with pytest.raises(VoiceError, match="rejected"):
             await voice.handle({"type": "error", "error": error | {"event_id": "unrelated"}})
+        await voice.handle(done("r2", status="cancelled"))
+        assert voice.usage_complete
 
     asyncio.run(scenario())
 

@@ -351,14 +351,6 @@ class SummaryWorker:
                 and profile
                 and any(r["role"] == "caller" for r in transcript)
             ):
-                try:
-                    self.rates.assert_current()
-                    self.ledger.reserve(
-                        cid, self.rates.summary_reservation(), horizon_seconds=60, incremental=True
-                    )
-                    can_generate = True
-                except (ConfigError, BudgetError):
-                    can_generate = False
                 if transcript_truncated:
                     # Keep the request bounded; explicit marker survives into the report.
                     payload = {
@@ -372,12 +364,16 @@ class SummaryWorker:
                         payload["caller_text"] = payload["caller_text"][
                             : len(payload["caller_text"]) // 2
                         ]
+                try:
+                    self.rates.assert_current()
+                    if not self.ledger.reserve_summary_attempt(
+                        cid, token, self.rates.summary_reservation()
+                    ):
+                        return True
+                    can_generate = True
+                except (ConfigError, BudgetError):
+                    can_generate = False
                 if can_generate:
-                    with self.store.transaction() as db:
-                        db.execute(
-                            "INSERT OR IGNORE INTO metadata VALUES(?,?)",
-                            ("summary_attempt:" + cid, "started"),
-                        )
                     try:
                         response = await self.provider.generate(payload, profile.report_language)
                         if len(json.dumps(response)) > 24000:

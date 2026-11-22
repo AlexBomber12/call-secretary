@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 
 from call_secretary.audio import AudioEndpoint, FatalAudioError
 from call_secretary.budget import Deadline, RateCard
@@ -41,11 +40,9 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
         closer: asyncio.Task[None] | None = None
         monitor: asyncio.Task[None] | None = None
         status = "interrupted"
-        attempted = False
         fatal_error: FatalAudioError | None = None
         try:
             endpoint = await IsolatedAudio.open()
-            attempted = True
             async with connect_api(settings.env["OPENAI_API_KEY"], rates.model) as socket:
                 session = Realtime(
                     socket,
@@ -88,16 +85,9 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                     fatal_error = exc
                 except Exception:
                     status = "audio_error"
-            complete = bool(not attempted or (voice and voice.usage_complete and status == "ended"))
+            complete = False
             try:
-                if voice:
-                    allowance = (
-                        Decimal(voice.input_bytes)
-                        / (24000 * 2 * 60)
-                        * rates.transcription_usd_per_minute
-                        * rates.usd_to_eur_upper_bound
-                    )
-                    controller.ledger.consume(cid, f"{cid}:transcription_allowance", allowance)
+                complete = controller.account_voice(voice)
             finally:
                 controller.finish(status, usage_complete=complete)
                 if fatal_error:
