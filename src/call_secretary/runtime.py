@@ -65,11 +65,7 @@ async def run_microphone(settings: Settings, profile_id: str | None) -> str:
                 closer = asyncio.create_task(closing())
                 monitor = asyncio.create_task(controller.monitor(session))
                 await deadline.run(session.run())
-                status = (
-                    "ended"
-                    if session.committed_items <= session.transcribed_items
-                    else "ended_text_incomplete"
-                )
+                status = "ended" if session.transcript_complete else "ended_text_incomplete"
         except TimeoutError:
             status = "duration_limit"
         except FatalAudioError as exc:

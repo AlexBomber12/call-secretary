@@ -239,6 +239,29 @@ def test_partial_capture_and_backpressure_remain_bounded():
     asyncio.run(scenario())
 
 
+def test_serial_pcm_drops_a_write_waiting_when_playback_is_interrupted():
+    async def scenario():
+        port = AudioPort()
+        endpoint = SerialPcm(port)
+        original = bytes(FRAME_BYTES)
+        late = struct.pack("<h", 2048) * (FRAME_BYTES // 2)
+        try:
+            await endpoint.read()
+            for _ in range(serial_pcm.QUEUE_FRAMES):
+                await endpoint.write(original)
+            blocked = asyncio.create_task(endpoint.write(late))
+            await asyncio.sleep(0)
+            assert not blocked.done()
+            await endpoint.interrupt()
+            await asyncio.wait_for(blocked, 1)
+            await endpoint.drain()
+            assert all(frame == bytes(MODEM_FRAME_BYTES) for frame in port.writes)
+        finally:
+            await endpoint.close()
+
+    asyncio.run(scenario())
+
+
 def test_close_does_not_write_another_frame_after_pacing_sleep(monkeypatch):
     monkeypatch.setattr(serial_pcm, "FRAME_SECONDS", 0.2)
 

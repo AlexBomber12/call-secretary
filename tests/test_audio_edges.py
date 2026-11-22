@@ -88,7 +88,7 @@ def test_playback_frame_accounting_and_inflight_cancellation():
         await playback.queue.join()
         assert playback.written["a"] == 1920
         assert playback.pending_bytes["a"] == 0
-        assert await playback.interrupt() == [("a", 40)]
+        assert await playback.interrupt(still_generating=True) == [("a", 40)]
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         with pytest.raises(AudioError):

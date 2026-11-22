@@ -54,8 +54,7 @@ def test_runtime_persists_final_state_and_keeps_unknown_cost(
 
     class Session:
         def __init__(self, *args):
-            self.committed_items = {"a"}
-            self.transcribed_items = set() if outcome == "missing_text" else {"a"}
+            self.transcript_complete = outcome != "missing_text"
             self.usage_complete = True
             self.input_bytes = 48000
             sessions.append(self)

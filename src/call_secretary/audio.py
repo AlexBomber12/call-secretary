@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Protocol
 
 RATE = 24000
@@ -109,6 +110,7 @@ class Playback:
         self.generation = 0
         self.current_item: str | None = None
         self.written: dict[str, int] = {}
+        self.written_at: dict[str, float] = {}
         self.pending_bytes: dict[str, int] = {}
 
     def enqueue(self, item_id: str, pcm: bytes) -> None:
@@ -132,17 +134,28 @@ class Playback:
                             self.written[chunk.item_id] = self.written.get(chunk.item_id, 0) + len(
                                 part
                             )
+                            self.written_at[chunk.item_id] = monotonic()
                     self.queued_bytes -= len(part)
                     self.pending_bytes[chunk.item_id] -= len(part)
             finally:
                 self.queue.task_done()
 
-    async def interrupt(self) -> list[tuple[str, int]]:
+    def _unplayed_ms(self, item_id: str, now: float) -> int:
+        elapsed = int((now - self.written_at.get(item_id, now)) * 1000)
+        return max(0, self.endpoint.latency_ms - elapsed)
+
+    async def interrupt(self, *, still_generating: bool = False) -> list[tuple[str, int]]:
+        now = monotonic()
         items = {iid for iid, count in self.pending_bytes.items() if count > 0}
-        if self.current_item:
+        if self.current_item and (
+            still_generating or self._unplayed_ms(self.current_item, now) > 0
+        ):
             items.add(self.current_item)
         result = [
-            (iid, max(0, self.written.get(iid, 0) * 1000 // (RATE * 2) - self.endpoint.latency_ms))
+            (
+                iid,
+                max(0, self.written.get(iid, 0) * 1000 // (RATE * 2) - self._unplayed_ms(iid, now)),
+            )
             for iid in items
         ]
         self.generation += 1

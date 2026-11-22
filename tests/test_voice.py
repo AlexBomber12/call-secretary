@@ -146,6 +146,73 @@ def test_interruption_before_first_playback_discards_future_cancelled_response_a
     asyncio.run(scenario())
 
 
+def test_turn_interrupted_before_response_created_drops_that_responses_audio():
+    async def scenario():
+        socket = Socket()
+        voice = Realtime(socket, Endpoint(), Hooks(), rates(), "prompt", [], "marin")
+        await voice.request_response()
+        await voice.handle({"type": "input_audio_buffer.speech_started", "item_id": "caller"})
+        await voice.handle({"type": "response.created", "response": {"id": "r1"}})
+        await voice.handle(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "r1",
+                "item_id": "late",
+                "delta": "AAA=",
+            }
+        )
+        assert voice.playback.queue.empty()
+        assert socket.sent[-1]["audio_end_ms"] == 0
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("elapsed, still_generating", [(0.0, False), (1.0, False), (1.0, True)])
+def test_barge_in_truncates_current_audio_only_when_queued_or_still_generating(
+    elapsed, still_generating, monkeypatch
+):
+    from call_secretary import audio
+
+    now = 50.0
+
+    async def scenario():
+        nonlocal now
+        endpoint, socket, hooks = Endpoint(), Socket(), Hooks()
+        endpoint.latency_ms = 10
+        voice = Realtime(socket, endpoint, hooks, rates(), "prompt", [], "marin")
+        await voice.handle({"type": "response.created", "response": {"id": "r1"}})
+        await voice.handle(
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "r1",
+                "item_id": "a",
+                "delta": base64.b64encode(bytes(960)).decode(),
+            }
+        )
+        playback = asyncio.create_task(voice.playback.run())
+        try:
+            await voice.playback.queue.join()
+            if not still_generating:
+                await voice.handle(
+                    {
+                        "type": "response.done",
+                        "response": {"id": "r1", "usage": {}, "status": "completed"},
+                    }
+                )
+            now += elapsed
+            await voice.handle({"type": "input_audio_buffer.speech_started", "item_id": "caller"})
+            durations = [
+                e["audio_end_ms"] for e in socket.sent if e["type"] == "conversation.item.truncate"
+            ]
+            assert durations == ([10] if not elapsed else ([20] if still_generating else []))
+        finally:
+            playback.cancel()
+            await asyncio.gather(playback, return_exceptions=True)
+
+    monkeypatch.setattr(audio, "monotonic", lambda: now, raising=False)
+    asyncio.run(scenario())
+
+
 def test_cancelled_partial_function_is_not_executed_or_parsed():
     async def scenario():
         hooks = Hooks()
