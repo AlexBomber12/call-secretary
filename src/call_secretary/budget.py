@@ -18,6 +18,22 @@ from call_secretary.storage import Store
 
 MICRO = Decimal(1_000_000)
 T = TypeVar("T")
+DEFAULT_TRANSCRIPTION_MODEL = "gpt-transcribe"
+DEFAULT_SUMMARY_MODEL = "gpt-6-luna"
+TRANSCRIPTION_ALLOWANCE = Decimal("0.05")
+# Global standard tariffs checked 2026-11-23. Cached input discounts are ignored.
+TRANSCRIPTION_TARIFFS = {
+    "gpt-transcribe": Decimal("0.0045"),
+    "gpt-4o-mini-transcribe": Decimal("0.003"),
+}
+SUMMARY_TARIFFS = {
+    "gpt-6-luna": (Decimal("0.10"), Decimal("0.50")),
+    "gpt-4.1-mini": (Decimal("0.40"), Decimal("1.60")),
+}
+RETIREMENT_DATES = {
+    "gpt-4.1-mini": date(2027, 1, 14),
+    "gpt-4o-mini-transcribe": date(2027, 2, 26),
+}
 
 
 class BudgetError(RuntimeError):
@@ -187,6 +203,34 @@ class Ledger:
         }
 
 
+def review_state(reviewed: date, today: date) -> str:
+    remaining = 30 - (today - reviewed).days
+    if remaining > 30:
+        return "invalid"
+    if remaining < 0:
+        return "expired"
+    return "expires_soon" if remaining <= 5 else "current"
+
+
+def billing_status(env: dict[str, str], *, today: date | None = None) -> dict[str, str | None]:
+    try:
+        reviewed = date.fromisoformat(env.get("BILLING_REVIEWED_ON", ""))
+    except ValueError:
+        return {"state": "unreviewed", "reviewed_on": None, "valid_through": None}
+    valid_through = reviewed + min(timedelta(days=30), date.max - reviewed)
+    return {
+        "state": review_state(reviewed, today or datetime.now(UTC).date()),
+        "reviewed_on": reviewed.isoformat(),
+        "valid_through": valid_through.isoformat(),
+    }
+
+
+def count_tokens(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise BudgetError("Malformed provider usage")
+    return value
+
+
 @dataclass(frozen=True)
 class RateCard:
     model: str
@@ -199,8 +243,10 @@ class RateCard:
     max_output_tokens: int = 512
     context_tokens: int = 4096
     # Upper accounting allowance, not a quoted transcription tariff.
-    transcription_usd_per_minute: Decimal = Decimal("0.05")
+    transcription_usd_per_minute: Decimal = TRANSCRIPTION_ALLOWANCE
     reviewed_on: date | None = None
+    transcription_model: str = DEFAULT_TRANSCRIPTION_MODEL
+    summary_model: str = DEFAULT_SUMMARY_MODEL
 
     @classmethod
     def load(cls, env: dict[str, str], *, today: date | None = None) -> RateCard:
@@ -211,11 +257,11 @@ class RateCard:
             raise ConfigError(
                 "Set BILLING_REVIEWED_ON after reviewing current provider tariffs"
             ) from None
-        if not 0 <= (today - reviewed).days <= 30:
+        if review_state(reviewed, today) in {"expired", "invalid"}:
             raise ConfigError("Billing policy review is stale or in the future")
         fx = money(env.get("USD_TO_EUR_UPPER_BOUND", ""), "USD_TO_EUR_UPPER_BOUND")
         model = env.get("REALTIME_MODEL", "")
-        # Official pricing reviewed 2026-11-08; discounts deliberately ignored.
+        # Per-million Realtime tariffs by modality.
         prices = {
             "gpt-realtime-2.1": ("32", "64", "4", "24"),
             "gpt-realtime-2.1-mini": ("10", "20", "0.60", "2.40"),
@@ -223,14 +269,40 @@ class RateCard:
         if model not in prices:
             raise ConfigError("Realtime model needs an explicitly reviewed rate card")
         audio_in, audio_out, text_in, text_out = (Decimal(n) for n in prices[model])
-        return cls(model, fx, audio_in, audio_out, text_in, text_out, reviewed_on=reviewed)
+        transcription = env.get("TRANSCRIPTION_MODEL") or DEFAULT_TRANSCRIPTION_MODEL
+        summary = env.get("SUMMARY_MODEL") or DEFAULT_SUMMARY_MODEL
+        if transcription not in TRANSCRIPTION_TARIFFS:
+            raise ConfigError("Transcription model needs a reviewed Realtime tariff")
+        if summary not in SUMMARY_TARIFFS:
+            raise ConfigError("Summary model needs a reviewed structured-output tariff")
+        card = cls(
+            model,
+            fx,
+            audio_in,
+            audio_out,
+            text_in,
+            text_out,
+            reviewed_on=reviewed,
+            transcription_usd_per_minute=max(
+                TRANSCRIPTION_ALLOWANCE, TRANSCRIPTION_TARIFFS[transcription]
+            ),
+            transcription_model=transcription,
+            summary_model=summary,
+        )
+        card.assert_current(today=today)
+        return card
 
-    def assert_current(self) -> None:
-        if (
-            self.reviewed_on is None
-            or not 0 <= (datetime.now(UTC).date() - self.reviewed_on).days <= 30
-        ):
+    def assert_current(self, *, today: date | None = None) -> None:
+        today = today or datetime.now(UTC).date()
+        if self.reviewed_on is None or review_state(self.reviewed_on, today) in {
+            "invalid",
+            "expired",
+        }:
             raise ConfigError("Billing review is required before another paid request")
+        for model in (self.transcription_model, self.summary_model):
+            retired = RETIREMENT_DATES.get(model)
+            if retired and today >= retired:
+                raise ConfigError("A selected provider model is retired; review the configuration")
 
     def reservation(self, prompt_bytes: int, seconds: int) -> Decimal:
         # A token cannot encode less than a UTF-8 byte; include protocol/tool margin.
@@ -245,21 +317,28 @@ class RateCard:
         return (voice + transcription) * self.usd_to_eur_upper_bound + self.summary_reservation()
 
     def summary_reservation(self) -> Decimal:
-        # Summary input is bounded to 48 kB and output to 768 tokens, at 4.1-mini rates.
-        return (
-            (Decimal(50000) * Decimal("0.40") + 768 * Decimal("1.60"))
-            / MICRO
-            * self.usd_to_eur_upper_bound
-        )
+        # Allow 48 kB of transcript plus the instructions and structured output schema.
+        price_in, price_out = SUMMARY_TARIFFS[self.summary_model]
+        return (50000 * price_in + 768 * price_out) / MICRO * self.usd_to_eur_upper_bound
+
+    def summary_tariff(self, usage: Any) -> dict[str, str]:
+        if not isinstance(usage, dict):
+            raise BudgetError("Malformed summary usage")
+        tokens_in = count_tokens(usage.get("input_tokens"))
+        tokens_out = count_tokens(usage.get("output_tokens"))
+        price_in, price_out = SUMMARY_TARIFFS[self.summary_model]
+        amount = (tokens_in * price_in + tokens_out * price_out) / MICRO
+        return {
+            "model": self.summary_model,
+            "input_usd_per_million": str(price_in),
+            "output_usd_per_million": str(price_out),
+            "usd_to_eur_upper_bound": str(self.usd_to_eur_upper_bound),
+            "eur": str(amount * self.usd_to_eur_upper_bound),
+        }
 
     def response_cost(self, usage: dict[str, Any]) -> Decimal:
-        def count(value: Any) -> int:
-            if type(value) is not int or value < 0:
-                raise BudgetError("Malformed provider usage")
-            return value
-
-        total_in = count(usage.get("input_tokens"))
-        total_out = count(usage.get("output_tokens"))
+        total_in = count_tokens(usage.get("input_tokens"))
+        total_out = count_tokens(usage.get("output_tokens"))
         detail_in = usage.get("input_token_details", {})
         detail_out = usage.get("output_token_details", {})
         if (
@@ -269,8 +348,8 @@ class RateCard:
             or "output_token_details" not in usage
         ):
             raise BudgetError("Provider usage token details are unavailable")
-        audio_in = count(detail_in.get("audio_tokens", 0))
-        audio_out = count(detail_out.get("audio_tokens", 0))
+        audio_in = count_tokens(detail_in.get("audio_tokens", 0))
+        audio_out = count_tokens(detail_out.get("audio_tokens", 0))
         if audio_in > total_in or audio_out > total_out:
             raise BudgetError("Inconsistent provider usage")
         return (

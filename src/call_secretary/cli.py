@@ -146,7 +146,9 @@ def main(argv: list[str] | None = None) -> int:
                 except ConfigError:
                     pass  # Invalid paid policy must not disable free reports or enrollment.
                 if worker_rates:
-                    worker_provider = OpenAISummary(settings.env["OPENAI_API_KEY"])
+                    worker_provider = OpenAISummary(
+                        settings.env["OPENAI_API_KEY"], model=worker_rates.summary_model
+                    )
 
             async def work() -> None:
                 client = TelegramClient(settings.env["TELEGRAM_BOT_TOKEN"])
@@ -229,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.offline:
                 settings.require("OPENAI_API_KEY")
                 rates = RateCard.load(settings.env)
-                provider = OpenAISummary(settings.env["OPENAI_API_KEY"])
+                provider = OpenAISummary(settings.env["OPENAI_API_KEY"], model=rates.summary_model)
             with Store(settings.state_dir, mode=None if args.offline else "live") as store:
                 worker = SummaryWorker(store, settings.family, provider=provider, rates=rates)
                 processed = asyncio.run(worker.process_one())
@@ -255,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
                             "Enroll every enabled family profile before phone service"
                         )
         if args.command == "status":
-            from call_secretary.budget import Ledger
+            from call_secretary.budget import Ledger, billing_status
             from call_secretary.health import snapshot
             from call_secretary.storage import Store
             from call_secretary.summaries import destination
@@ -283,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
                         "profiles_enabled": sum(p.enabled for p in settings.family.profiles),
                         "profiles_enrolled": enrolled,
                         "budget": budget_status,
+                        "billing_review": billing_status(settings.env),
                         "health": health_status,
                         "voice_key_configured": bool(settings.env.get("OPENAI_API_KEY")),
                         "telegram_token_configured": bool(settings.env.get("TELEGRAM_BOT_TOKEN")),

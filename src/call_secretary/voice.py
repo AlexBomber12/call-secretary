@@ -63,7 +63,7 @@ def session_update(
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": RATE},
-                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "transcription": {"model": rates.transcription_model},
                     "turn_detection": {
                         "type": "server_vad",
                         "create_response": False,
@@ -160,6 +160,7 @@ class Realtime:
         if self.responses >= self.rates.max_responses:
             self.finish_event.set()
             return
+        self.rates.assert_current()
         self.responses += 1
         self.pending = True
         self.user_pending = False
@@ -236,6 +237,7 @@ class Realtime:
                 return
             if len(pcm) > 48000 or len(pcm) % 2:
                 raise VoiceError("Invalid bounded input frame")
+            self.rates.assert_current()
             self.input_bytes += len(pcm)
             await self.send(
                 {

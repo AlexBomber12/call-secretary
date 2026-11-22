@@ -583,7 +583,7 @@ def test_summary_cannot_start_paid_work_when_voice_usage_leaves_insufficient_bud
             )
             await call.text("caller", "caller", "Synthetic callback request", False, 1)
             # A provider overrun is recorded, even above the original conservative hold.
-            assert not call.ledger.consume(call.cid, "unexpected-voice-bill", Decimal("49.99"))
+            assert not call.ledger.consume(call.cid, "unexpected-voice-bill", Decimal("49.999"))
             call.finish("provider_or_audio_error")
             provider = GeneratedSummary()
             await SummaryWorker(store, family, provider=provider, rates=rates).process_one()
@@ -591,7 +591,7 @@ def test_summary_cannot_start_paid_work_when_voice_usage_leaves_insufficient_bud
             assert (
                 "summary_unavailable_original_text" in report_for(store, call.cid)["uncertainties"]
             )
-            assert Decimal(call.ledger.status()["committed_eur"]) == Decimal("49.99")
+            assert Decimal(call.ledger.status()["committed_eur"]) == Decimal("49.999")
 
     asyncio.run(scenario())
 

@@ -67,8 +67,9 @@ def test_cli_phone_readiness_checks_every_private_destination(command, settings,
     assert "synthetic-key" not in capsys.readouterr().out
 
 
-def test_cli_status_without_state_and_process_without_jobs(command, settings):
+def test_cli_status_without_state_and_process_without_jobs(command, settings, capsys):
     assert command("status") == 0
+    assert json.loads(capsys.readouterr().out)["billing_review"]["state"] == "current"
     assert command("process-once", "--offline") == 0
     assert command("process-once") == 0
 

@@ -54,14 +54,23 @@ def test_report_preserves_uncertainty_instead_of_claiming_a_fact(family):
     assert "? ?" in text and "call tomorrow" in text
 
 
-@pytest.mark.parametrize("status", ["completed", "incomplete"])
-def test_summary_http_contract_is_bounded_private_and_structured(monkeypatch, status):
+@pytest.mark.parametrize(
+    "status,model",
+    [("completed", "gpt-6-luna"), ("incomplete", "gpt-4.1-mini")],
+)
+def test_summary_http_contract_is_bounded_private_and_structured(monkeypatch, status, model):
     original = httpx.AsyncClient
 
     def handler(request):
         assert str(request.url) == "https://api.openai.com/v1/responses"
         payload = json.loads(request.content)
         assert payload["store"] is False and payload["max_output_tokens"] == 768
+        assert payload["model"] == model
+        if model == "gpt-6-luna":
+            assert payload["reasoning"] == {"effort": "none"}
+            assert payload["prompt_cache_options"] == {"mode": "explicit"}
+        else:
+            assert "reasoning" not in payload and "prompt_cache_options" not in payload
         assert payload["text"]["format"]["strict"] is True
         return httpx.Response(
             200,
@@ -84,7 +93,7 @@ def test_summary_http_contract_is_bounded_private_and_structured(monkeypatch, st
         "AsyncClient",
         lambda **kwargs: original(transport=httpx.MockTransport(handler), **kwargs),
     )
-    provider = OpenAISummary("synthetic-key")
+    provider = OpenAISummary("synthetic-key", model=model)
     assert "synthetic-key" not in repr(provider)
     result = asyncio.run(provider.generate({"utterances": []}, "ru"))
     assert result["text"] == ("{}" if status == "completed" else "")
@@ -116,7 +125,9 @@ def test_disabled_binding_or_profile_never_becomes_a_destination(tmp_path, famil
         assert destination(store, family.profiles[0]) is None
 
 
-@pytest.mark.parametrize("outcome", ["oversized", "stale", "invalid_usage", "overrun"])
+@pytest.mark.parametrize(
+    "outcome", ["oversized", "stale", "invalid_usage", "missing_usage", "missing_id", "overrun"]
+)
 def test_summary_failure_keeps_work_and_billing_consistent(tmp_path, family, rates, outcome):
     async def scenario():
         with Store(tmp_path / "state") as store:
@@ -135,6 +146,10 @@ def test_summary_failure_keeps_work_and_billing_consistent(tmp_path, family, rat
                         store.db.execute("UPDATE summary_jobs SET lease_token='other'")
                     if outcome == "invalid_usage":
                         response["usage"] = {"input_tokens": True, "output_tokens": -1}
+                    if outcome == "missing_usage":
+                        response["usage"] = None
+                    if outcome == "missing_id":
+                        response["id"] = None
                     if outcome == "overrun":
                         response["usage"] = {"input_tokens": 1_000_000, "output_tokens": 1_000_000}
                     return response

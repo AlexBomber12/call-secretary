@@ -35,6 +35,14 @@ After the modem confirms the owned call is active, the Serial PCM driver checks 
 
 Phone service requires an enabled/enrolled recipient and a configured Telegram bot. Missing/stale voice configuration or exhausted budget uses the local prompt without a paid request. At most one call is accepted. Voice capture starts only after the Realtime session acknowledgement; no call audio is saved.
 
+## Model selection and billing review
+
+`REALTIME_MODEL` accepts `gpt-realtime-2.1` and `gpt-realtime-2.1-mini`. The defaults for `TRANSCRIPTION_MODEL` and `SUMMARY_MODEL` are `gpt-transcribe` and `gpt-6-luna`. Existing configurations may select `gpt-4o-mini-transcribe` through 2027-02-25 and `gpt-4.1-mini` through 2027-01-13. Application validation rejects the retired values on their published shutdown dates. [Model shutdowns](https://developers.openai.com/api/docs/deprecations)
+
+Set `BILLING_REVIEWED_ON` in the private environment after checking the provider's tariffs. `call-secretary status` prints the UTC review date and last valid date. `expires_soon` starts five days before the last valid date. Expired approval stops new paid voice and summary requests. A saved summary can still be delivered, with its original EUR charge recovered from the stored tariff. Older checkpoints without a tariff retain any unrecorded costs for reconciliation.
+
+The application reserves a conservative EUR allowance and keeps a separate transcription estimate. The global standard tariff for GPT-Transcribe on November 23, 2026 was $0.0045 per minute. GPT-6 Luna text cost $0.10 per million input tokens and $0.50 per million output tokens with caching disabled for summaries. Verify account access and measured costs in the pilot. [OpenAI pricing](https://developers.openai.com/api/docs/pricing) · [GPT-Transcribe](https://developers.openai.com/api/docs/models/gpt-transcribe) · [GPT-6 Luna](https://developers.openai.com/api/docs/models/gpt-6-luna)
+
 ## Audio isolation and local prompt
 
 Each native direction runs in a spawned process, not the service thread pool. IPC carries at most one small request per lane. Normal operations time out after 2 seconds, opening after 8 seconds. Failure/cancellation terminates the lane, escalates to kill and reaps it. A process that cannot be reaped is fatal so the service supervisor restarts the cgroup. Full cleanup is attempted for both directions. The microphone prototype also uses these workers.
