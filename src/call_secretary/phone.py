@@ -21,7 +21,8 @@ from call_secretary.isolated_audio import AudioSpec, IsolatedAudio
 from call_secretary.locking import InstanceLock
 from call_secretary.modem import ModemError, at_query, open_serial
 from call_secretary.routing import Router
-from call_secretary.sim7600 import ATChannel, CallControl, ObservedCall
+from call_secretary.serial_pcm import SerialPcm, VoicePorts, open_pcm_audio
+from call_secretary.sim7600 import ATChannel, CallControl, ObservedCall, SerialPort
 from call_secretary.storage import Store
 from call_secretary.summaries import destination
 from call_secretary.voice import Realtime, connect_api
@@ -32,34 +33,42 @@ class PhoneOptions:
     device: str
     ingress: str
     audio: AudioSpec
+    pcm: VoicePorts | None = None
 
     @classmethod
     def load(cls, settings: Settings) -> PhoneOptions:
         env = settings.env
         if env.get("PHONE_H1_CONFIRMED") != "true":
             raise ConfigError("Phone service requires recorded H1 hardware acceptance")
-        required = ("MODEM_CONTROL_DEVICE", "MODEM_AUDIO_DEVICE", "PHONE_INGRESS_ID")
-        if any(not env.get(key, "").strip() for key in required):
-            raise ConfigError("Set explicit accepted modem, audio names and ingress")
+        device = env.get("MODEM_CONTROL_DEVICE", "").strip()
+        audio = env.get("MODEM_AUDIO_DEVICE", "").strip()
+        ingress = env.get("PHONE_INGRESS_ID", "").strip()
+        pcm = env.get("MODEM_PCM_DEVICE", "").strip()
+        if not device or not ingress or not (audio or pcm):
+            raise ConfigError("Set explicit accepted modem, audio path or name, and ingress")
         try:
             rate = int(env.get("MODEM_AUDIO_RATE", ""))
         except ValueError:
             raise ConfigError("Set the H1 verified mono PCM16 sample rate") from None
         if rate not in {8000, 16000, 24000, 48000}:
             raise ConfigError("Unsupported phone audio sample rate")
+        if pcm and rate != 8000:
+            raise ConfigError("SIM7600 Serial PCM requires an accepted 8 kHz configuration")
         return cls(
-            env[required[0]],
-            env[required[2]],
+            device,
+            ingress,
             AudioSpec(
-                env.get("MODEM_AUDIO_INPUT") or env[required[1]],
-                env.get("MODEM_AUDIO_OUTPUT") or env[required[1]],
-                rate,
+                env.get("MODEM_AUDIO_INPUT") or audio, env.get("MODEM_AUDIO_OUTPUT") or audio, rate
             ),
+            VoicePorts(device, pcm) if pcm else None,
         )
 
 
 def open_control(device: str) -> CallControl:
-    port = open_serial(device)
+    return initialize_control(open_serial(device))
+
+
+def initialize_control(port: SerialPort) -> CallControl:
     channel = ATChannel(port)
     try:
         if not any("SIM7600" in line for line in at_query(port, "AT+CGMM")):
@@ -72,6 +81,72 @@ def open_control(device: str) -> CallControl:
     except BaseException:
         channel.close()
         raise
+
+
+def open_pcm_control(ports: VoicePorts) -> CallControl:
+    return initialize_control(ports.open())
+
+
+async def answer_confirmed(control: CallControl, token: str) -> None:
+    await asyncio.to_thread(control.answer, token)
+    for _ in range(6):
+        current = await asyncio.to_thread(control.poll)
+        if current is None or current.token != token:
+            raise ModemError("Answered call ended or was replaced")
+        if current.state == 0:
+            return
+        await asyncio.sleep(0.1)
+    raise ModemError("Modem did not confirm an active answered call")
+
+
+async def modem_audio_test(ports: VoicePorts) -> int:
+    """One explicitly requested, memory-only record/playback acceptance call."""
+    control = await asyncio.to_thread(open_pcm_control, ports)
+    observed: ObservedCall | None = None
+    endpoint: SerialPcm | None = None
+    activating = False
+    fatal: FatalAudioError | None = None
+    try:
+        try:
+            print("Call the dedicated modem now. Wait for the recording prompt.", flush=True)
+            async with asyncio.timeout(60):
+                observed = await asyncio.to_thread(control.poll)
+                while observed is None:
+                    await asyncio.sleep(0.2)
+                    observed = await asyncio.to_thread(control.poll)
+            await answer_confirmed(control, observed.token)
+            activating = True
+            await asyncio.to_thread(control.enable_pcm, observed.token)
+            endpoint = await open_pcm_audio(ports, control.channel)
+            async with asyncio.timeout(18):
+                print("Speak now for five seconds.", flush=True)
+                recording = [await endpoint.read() for _ in range(250)]
+                print("Listen for your recorded phrase.", flush=True)
+                for frame in recording:
+                    await endpoint.write(frame)
+                await endpoint.drain()
+            return sum(map(len, recording))
+        finally:
+            if endpoint is not None:
+                await endpoint.close()
+    except FatalAudioError as exc:
+        fatal = exc
+        raise
+    finally:
+        try:
+            try:
+                if observed is not None:
+                    try:
+                        await asyncio.to_thread(control.hangup, observed.token)
+                    finally:
+                        if activating:
+                            await asyncio.to_thread(control.disable_pcm)
+            finally:
+                await asyncio.to_thread(control.channel.close)
+        except ModemError:
+            if fatal is not None:
+                raise fatal from None
+            raise
 
 
 async def race_call(operation: Coroutine[Any, Any, None], watch: Coroutine[Any, Any, None]) -> bool:
@@ -106,6 +181,7 @@ async def handle_call(
     voice: Realtime | None = None
     rates: RateCard | None = None
     attempted = False
+    pcm_attempted = False
     audio_ok = False
     status = "interrupted"
     deadline = call.started + settings.family.max_duration_seconds
@@ -118,20 +194,21 @@ async def handle_call(
             if current is None or current.token != observed.token:
                 return
 
+    async def open_audio() -> AudioEndpoint:
+        if options.pcm is not None:
+            return await open_pcm_audio(options.pcm, control.channel)
+        return await audio_factory(options.audio)
+
     async def converse() -> None:
-        nonlocal voice, rates, attempted, status, endpoint
-        endpoint = await audio_factory(options.audio)
+        nonlocal voice, rates, attempted, status, endpoint, pcm_attempted
+        if options.pcm is None:
+            endpoint = await open_audio()
+        await answer_confirmed(control, observed.token)
+        if endpoint is None:
+            pcm_attempted = True
+            await asyncio.to_thread(control.enable_pcm, observed.token)
+            endpoint = await open_audio()
         health.update(store, "audio", "active")
-        await asyncio.to_thread(control.answer, observed.token)
-        for _ in range(6):
-            current = await asyncio.to_thread(control.poll)
-            if current is None or current.token != observed.token:
-                raise ModemError("Answered call ended or was replaced")
-            if current.state == 0:
-                break
-            await asyncio.sleep(0.1)
-        else:
-            raise ModemError("Modem did not confirm an active answered call")
         try:
             settings.require("OPENAI_API_KEY", "REALTIME_MODEL", "REALTIME_VOICE")
             rates = RateCard.load(settings.env)
@@ -187,7 +264,7 @@ async def handle_call(
                 # Cleanup must succeed before opening replacement workers; an
                 # unreaped native failure stays fatal through final cleanup.
                 await endpoint.close()
-                endpoint = await audio_factory(options.audio)
+                endpoint = await open_audio()
             await endpoint.interrupt()
             for offset in range(0, len(phrase), FRAME_BYTES):
                 await endpoint.write(phrase[offset : offset + FRAME_BYTES])
@@ -218,6 +295,11 @@ async def handle_call(
             status = "audio_error"
             raise
         finally:
+            if pcm_attempted:
+                try:
+                    await asyncio.to_thread(control.disable_pcm)
+                except ModemError:
+                    health.update(store, "modem", "unavailable")
             try:
                 if voice and rates:
                     amount = Decimal(voice.input_bytes) / (24000 * 2 * 60)
@@ -263,7 +345,10 @@ async def run_phone(settings: Settings) -> None:
                 fatal_error = None
                 try:
                     health.update(store, "modem", "starting")
-                    control = await asyncio.to_thread(open_control, options.device)
+                    if options.pcm is None:
+                        control = await asyncio.to_thread(open_control, options.device)
+                    else:
+                        control = await asyncio.to_thread(open_pcm_control, options.pcm)
                     while not stop.is_set():
                         health.update(store, "modem", "ready")
                         observed = await asyncio.to_thread(control.poll)

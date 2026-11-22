@@ -253,6 +253,8 @@ class Settings:
         if self.env.get("AUDIO_RECORDING_ENABLED", "false").lower() != "false":
             raise ConfigError("Audio recording must be disabled")
         if modem:
-            self.require("TELEGRAM_BOT_TOKEN", "MODEM_CONTROL_DEVICE", "MODEM_AUDIO_DEVICE")
+            self.require("TELEGRAM_BOT_TOKEN", "MODEM_CONTROL_DEVICE")
+            if not self.env.get("MODEM_PCM_DEVICE"):
+                self.require("MODEM_AUDIO_DEVICE")
             if not all(p.enabled for p in self.family.profiles):
                 raise ConfigError("Enable every configured profile before phone service")

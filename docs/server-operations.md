@@ -9,7 +9,7 @@ The software path is implemented and tested offline. **H1/H2 and deployment on t
 | US-O10 | Immutable release staging, systemd phone/worker units, private directories, explicit activation, consistent backup and release rollback | Target package install, USB permissions, reboot/update/rollback acceptance |
 | US-O11 | Content-free modem/audio/voice/Telegram observations with timestamps, stale detection and queues grouped by state in `status` | Observe real device/network failures; idle is not an API connectivity probe |
 | US-O12 | Spawned, independently killable capture/playback workers; bounded IPC; timeout/cancellation kills and reaps hung native work; systemd kills the entire cgroup on stop | Native PortAudio/device stress and reconnect checks. The real OS-process kill path is tested without audio hardware |
-| US-H09 | Explicit unique capture/playback names, mono PCM16 at 8/16/24/48 kHz, streaming conversion to/from Realtime 24 kHz, interruptable output | Verify actual USB interfaces, rate, simultaneous streams, latency and sound quality |
+| US-H09 | SIM7600 Serial PCM at 8 kHz or explicit PortAudio devices at an H1-verified rate, streaming conversion to/from Realtime 24 kHz, interruptible output | Verify actual USB interfaces, rate, simultaneous streams, latency and sound quality |
 | US-H10 | `phone-run`: SIM7600 opener, call polling/ownership, Realtime/controller, private history and durable summary/outbox workers | A forwarded call on the actual Vodafone SIM; shared-line original-called metadata remains unproven |
 | US-H11 | Fixed Italian local prompt via espeak-ng, prepared in memory before modem use; API/key/rate/budget failure uses the prompt and hangup | Listen to prompt on the phone and verify network-side disconnection |
 | US-H12 | Remote hangup/replacement watcher, cancellation, ownership recheck before hangup, partial-text persistence, retained unknown budget, modem reopen with backoff and SIGTERM cleanup | USB loss/return, caller hangup, network outage and process restart on real equipment |
@@ -18,22 +18,20 @@ The software path is implemented and tested offline. **H1/H2 and deployment on t
 
 Until H1 is recorded, keep `PHONE_H1_CONFIRMED=false`. `phone-run` refuses before opening hardware or generating speech. The flag is an operator declaration, not an automatic hardware test or proof of H1. It never starts the service on its own.
 
-After H1, set these in the private environment file:
+After Serial PCM passes H1, set the verified paths in the private environment file.
 
 ```dotenv
 STATE_DIR=/var/lib/call-secretary
 PHONE_H1_CONFIRMED=true
 PHONE_INGRESS_ID=dedicated-family-modem
 MODEM_CONTROL_DEVICE=/dev/serial/by-id/REPLACE_WITH_ACCEPTED_INTERFACE
-MODEM_AUDIO_DEVICE=REPLACE_WITH_EXACT_UNIQUE_SOUNDDEVICE_NAME
-MODEM_AUDIO_INPUT=
-MODEM_AUDIO_OUTPUT=
+MODEM_PCM_DEVICE=/dev/serial/by-path/REPLACE_WITH_VERIFIED_PCM_PATH
 MODEM_AUDIO_RATE=8000
 ```
 
-The rate is an **example**, not an assumed SIM7600 capability. Record the actual mono signed PCM16 rate in H1. Optional input/output names override the common name. Matching is exact and must identify one input/output endpoint; there is no default-device fallback for phone service. Separate capture/playback streams must work simultaneously. Serial access uses the existing stable-device/ownership check and exclusive opening. A model probe rejects a non-SIM7600 before any call-control command.
+Serial PCM uses mono signed PCM16 at 8 kHz over the dedicated SIM7600. The AT and PCM paths must identify interfaces on the same physical modem. The application checks the model and opens the interfaces exclusively. In a legacy PortAudio configuration, leave `MODEM_PCM_DEVICE` empty and use the exact device name in `MODEM_AUDIO_DEVICE`, optionally overridden by `MODEM_AUDIO_INPUT` and `MODEM_AUDIO_OUTPUT`. Record the accepted mono PCM16 rate in H1.
 
-No modem-specific USB-audio activation/reset commands are guessed or sent. If firmware needs activation or different audio transport, establish it during H1 and update the driver before enabling service. This may require a hardware-driven change. Original called numbers are never fabricated from CLCC. Leave shared-line automatic routes absent until H2; the assistant asks who the call is for.
+After the modem confirms the owned call is active, the Serial PCM driver checks the 8 kHz mode and starts PCM registration. Afterward it disables PCM only on an idle modem. Leave shared-line automatic routes absent until H2 verifies original called numbers. The assistant asks who the call is for when ingress is ambiguous.
 
 Phone service requires an enabled/enrolled recipient and a configured Telegram bot. Missing/stale voice configuration or exhausted budget uses the local prompt without a paid request. At most one call is accepted. Voice capture starts only after the Realtime session acknowledgement; no call audio is saved.
 

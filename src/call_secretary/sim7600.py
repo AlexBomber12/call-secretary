@@ -17,7 +17,23 @@ from call_secretary.modem import ModemError
 from call_secretary.routing import Incoming
 
 INDEXED_RELEASE = {index: f"AT+CHLD=1{index}" for index in range(1, 10)}
-COMMANDS = frozenset({"AT", "AT+CLCC=0", "AT+CLCC", "ATA", "AT+CHUP", *INDEXED_RELEASE.values()})
+RESPONSE_PREFIXES = {
+    "AT+CLCC": "+CLCC:",
+    "AT+CPCMFRM?": "+CPCMFRM:",
+    "AT+CPCMREG?": "+CPCMREG:",
+}
+COMMANDS = frozenset(
+    {
+        "AT",
+        "AT+CLCC=0",
+        "ATA",
+        "AT+CHUP",
+        "AT+CPCMREG=0",
+        "AT+CPCMREG=1",
+        *INDEXED_RELEASE.values(),
+        *RESPONSE_PREFIXES,
+    }
+)
 TERMINAL = frozenset({"NO CARRIER", "BUSY", "NO ANSWER", "NO DIALTONE"})
 
 
@@ -26,9 +42,12 @@ class CommandRejected(ModemError):
 
 
 class SerialPort(Protocol):
+    @property
+    def in_waiting(self) -> int: ...
     def read(self, size: int) -> bytes: ...
     def write(self, data: bytes) -> int: ...
     def close(self) -> None: ...
+    def fileno(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -84,6 +103,9 @@ class ATChannel:
         self.closed = False
         self._claimed = False
 
+    def fileno(self) -> int:
+        return self._port.fileno()
+
     def close(self) -> None:
         with self._lock:
             if not self.closed:
@@ -134,6 +156,7 @@ class ATChannel:
                 deadline = self._clock() + timeout
                 self._bytes_read = 0
                 lines: list[str] = []
+                prefix = RESPONSE_PREFIXES.get(command)
                 while True:
                     line = self._line(deadline)
                     if not line or line == command:
@@ -148,7 +171,7 @@ class ATChannel:
                         self._event(line)
                         if command == "ATA":
                             raise CommandRejected("Incoming call is no longer answerable")
-                    elif command == "AT+CLCC" and line.startswith("+CLCC:"):
+                    elif prefix and line.startswith(prefix):
                         lines.append(line)
                     else:
                         self._event(line)
@@ -294,6 +317,28 @@ class CallControl:
                 raise ModemError("Call is already answered")
             self.channel.execute("ATA")
             self._owned = True
+
+    def enable_pcm(self, token: str) -> None:
+        with self.channel._lock:
+            if self._check(token).state != 0:
+                raise ModemError("PCM requires the confirmed active call")
+            formats = self.channel.execute("AT+CPCMFRM?")
+            if not any(re.fullmatch(r"\+CPCMFRM:\s*0", line) for line in formats):
+                raise ModemError("Expected SIM7600 PCM at 8 kHz")
+            self.channel.execute("AT+CPCMREG=1")
+            for _ in range(6):
+                states = self.channel.execute("AT+CPCMREG?", timeout=0.7)
+                if any(re.fullmatch(r"\+CPCMREG:\s*1", line) for line in states):
+                    self._check(token)
+                    return
+                time.sleep(0.2)
+            raise ModemError("SIM7600 PCM activation did not confirm")
+
+    def disable_pcm(self) -> None:
+        with self.channel._lock:
+            if self.poll() is not None:
+                raise ModemError("PCM stop requires an idle modem")
+            self.channel.execute("AT+CPCMREG=0")
 
     def hangup(self, token: str) -> ObservedCall | None:
         with self.channel._lock:
