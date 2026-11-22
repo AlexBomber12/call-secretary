@@ -117,7 +117,7 @@ async def modem_audio_test(ports: VoicePorts) -> int:
             await answer_confirmed(control, observed.token)
             activating = True
             await asyncio.to_thread(control.enable_pcm, observed.token)
-            endpoint = await open_pcm_audio(ports)
+            endpoint = await open_pcm_audio(ports, control.channel)
             async with asyncio.timeout(18):
                 print("Speak now for five seconds.", flush=True)
                 recording = [await endpoint.read() for _ in range(250)]
@@ -196,7 +196,7 @@ async def handle_call(
 
     async def open_audio() -> AudioEndpoint:
         if options.pcm is not None:
-            return await open_pcm_audio(options.pcm)
+            return await open_pcm_audio(options.pcm, control.channel)
         return await audio_factory(options.audio)
 
     async def converse() -> None:

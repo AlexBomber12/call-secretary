@@ -22,6 +22,10 @@ class AudioPort:
         self.closed = False
         self.bad = bad
 
+    @property
+    def in_waiting(self):
+        return 20 * MODEM_FRAME_BYTES if self.bad == "backlog" else 0
+
     def write(self, data):
         self.writes.append(data)
         if self.bad == "write":
@@ -67,7 +71,7 @@ def test_exchange_is_paced_and_uses_silence_and_exact_frames():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ["write", "read", "oversize"])
+@pytest.mark.parametrize("failure", ["write", "read", "oversize", "backlog"])
 def test_transport_failure_surfaces_and_closes_port(failure):
     async def scenario():
         port = AudioPort(bad=failure)
@@ -124,43 +128,101 @@ def test_verified_port_open_rechecks_identity_and_closes_on_change(monkeypatch, 
     validate = Mock(side_effect=["usb-1", "usb-2" if problem == "changed_parent" else "usb-1"])
     monkeypatch.setattr(VoicePorts, "validate", validate)
     port = Mock()
+    channel = Mock() if audio else None
     unopened = Mock(return_value=port)
     monkeypatch.setattr(serial_pcm, "open_serial", unopened)
-    stat = Mock(side_effect=OSError("private") if problem == "stat_error" else None)
+    stat = Mock(
+        side_effect=lambda fd: "same AT" if audio and fd == channel.fileno.return_value else "PCM"
+    )
+    lookup = Mock(side_effect=lambda path: "same AT" if path == "control" and audio else "PCM")
+    same = Mock(side_effect=lambda a, b: a == b and (a == "same AT" or problem != "changed_fd"))
+    if problem == "stat_error":
+
+        def missing(fd):
+            if fd == port.fileno.return_value:
+                raise OSError("private")
+            return "same AT"
+
+        stat.side_effect = missing
     monkeypatch.setattr(
         serial_pcm,
         "os",
         SimpleNamespace(
             fstat=stat,
-            stat=Mock(),
-            path=SimpleNamespace(samestat=lambda a, b: problem != "changed_fd"),
+            stat=lookup,
+            path=SimpleNamespace(samestat=same),
         ),
     )
     if problem:
         with pytest.raises(ModemError, match="verified USB"):
-            ports.open(audio=audio)
+            ports.open(control=channel)
         port.close.assert_called_once()
     else:
-        assert ports.open(audio=audio) is port
+        assert ports.open(control=channel) is port
         port.close.assert_not_called()
     unopened.assert_called_once_with(
         "audio" if audio else "control", timeout=0.02 if audio else 0.1
     )
 
 
+@pytest.mark.parametrize("swap", ["already_replaced", "during_open"])
+def test_pcm_does_not_open_on_a_replacement_for_the_live_at_port(monkeypatch, swap):
+    ports = VoicePorts("control", "audio")
+    monkeypatch.setattr(VoicePorts, "validate", lambda self: "same physical path")
+    port, at_port = Mock(), Mock()
+    at_port.fileno.return_value = 12
+    channel = ATChannel(at_port)
+    port.fileno.return_value = 14
+    opened = Mock(return_value=port)
+    monkeypatch.setattr(serial_pcm, "open_serial", opened)
+
+    def stat(path):
+        if path == "audio":
+            return "pcm"
+        if swap == "already_replaced" or opened.called:
+            return "new control"
+        return "old control"
+
+    monkeypatch.setattr(
+        serial_pcm,
+        "os",
+        SimpleNamespace(
+            fstat={12: "old control", 14: "pcm"}.__getitem__,
+            stat=stat,
+            path=SimpleNamespace(samestat=lambda a, b: a == b),
+        ),
+    )
+    with pytest.raises(ModemError, match="verified USB"):
+        ports.open(control=channel)
+    assert opened.called == (swap == "during_open")
+    assert port.close.called == (swap == "during_open")
+
+
 def test_partial_capture_and_backpressure_remain_bounded():
     class ShortPort(AudioPort):
+        waiting = 0
+
+        @property
+        def in_waiting(self):
+            return self.waiting
+
+        def write(self, data):
+            self.waiting += MODEM_FRAME_BYTES
+            return super().write(data)
+
         def read(self, size):
-            if not self.read_sizes:
-                return super().read(40)
-            return super().read(size)
+            result = super().read(min(size, self.waiting, 40) if not self.read_sizes else size)
+            self.waiting -= len(result)
+            return result
 
     async def scenario():
         port = ShortPort()
         endpoint = SerialPcm(port)
         try:
             frame = await asyncio.wait_for(endpoint.read(), 1)
-            assert len(frame) == FRAME_BYTES and port.read_sizes[:2] == [40, 280]
+            assert len(frame) == FRAME_BYTES and port.read_sizes[:2] == [40, 600]
+            assert port.waiting == 0
+            assert len(await endpoint.read()) == FRAME_BYTES
             for invalid in (b"", b"x", bytes(FRAME_BYTES + 2)):
                 with pytest.raises(AudioError, match="PCM16"):
                     await endpoint.write(invalid)
@@ -204,12 +266,13 @@ def test_open_audio_returns_ready_serial_pcm_transport(monkeypatch):
         port = AudioPort()
         opened = Mock(return_value=port)
         monkeypatch.setattr(VoicePorts, "open", opened)
-        endpoint = await open_pcm_audio(VoicePorts("control", "audio"))
+        channel = Mock()
+        endpoint = await open_pcm_audio(VoicePorts("control", "audio"), channel)
         try:
             assert len(await asyncio.wait_for(endpoint.read(), 1)) == FRAME_BYTES
         finally:
             await endpoint.close()
-        opened.assert_called_once_with(audio=True)
+        opened.assert_called_once_with(control=channel)
         assert port.closed
 
     asyncio.run(scenario())
@@ -221,8 +284,10 @@ def test_cancelling_open_closes_the_eventual_port(monkeypatch, outcome):
         entered, release = threading.Event(), threading.Event()
         port = AudioPort(bad="close" if outcome == "close_error" else None)
 
-        def open_port(self, *, audio):
-            assert audio
+        channel = Mock()
+
+        def open_port(self, *, control):
+            assert control is channel
             entered.set()
             assert release.wait(1)
             if outcome == "open_error":
@@ -230,7 +295,7 @@ def test_cancelling_open_closes_the_eventual_port(monkeypatch, outcome):
             return port
 
         monkeypatch.setattr(VoicePorts, "open", open_port)
-        task = asyncio.create_task(open_pcm_audio(VoicePorts("control", "audio")))
+        task = asyncio.create_task(open_pcm_audio(VoicePorts("control", "audio"), channel))
         assert await asyncio.to_thread(entered.wait, 1)
         task.cancel()
         release.set()
@@ -336,7 +401,8 @@ def test_h1_probe_uses_no_live_settings_and_cleans_owned_call(monkeypatch, outco
 
     endpoint = Endpoint()
 
-    async def open_audio(ports):
+    async def open_audio(ports, channel):
+        assert channel is control.channel
         return endpoint
 
     monkeypatch.setattr(phone, "open_pcm_audio", open_audio)

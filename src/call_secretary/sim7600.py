@@ -42,9 +42,12 @@ class CommandRejected(ModemError):
 
 
 class SerialPort(Protocol):
+    @property
+    def in_waiting(self) -> int: ...
     def read(self, size: int) -> bytes: ...
     def write(self, data: bytes) -> int: ...
     def close(self) -> None: ...
+    def fileno(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,9 @@ class ATChannel:
         self._bytes_read = 0
         self.closed = False
         self._claimed = False
+
+    def fileno(self) -> int:
+        return self._port.fileno()
 
     def close(self) -> None:
         with self._lock:

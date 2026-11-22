@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from call_secretary.audio import FRAME_BYTES, RATE, AudioError, FatalAudioError
 from call_secretary.modem import ModemError, open_serial
-from call_secretary.sim7600 import SerialPort
+from call_secretary.sim7600 import ATChannel, SerialPort
 
 MODEM_RATE = 8000
 MODEM_FRAME_BYTES = 320
@@ -68,20 +68,31 @@ class VoicePorts:
             raise ModemError("Control and PCM must be on the same physical SIM7600")
         return control
 
-    def open(self, *, audio: bool = False) -> SerialPort:
+    def open(self, *, control: ATChannel | None = None) -> SerialPort:
         parent = self.validate()
-        device = self.audio if audio else self.control
-        port = open_serial(device, timeout=FRAME_SECONDS if audio else 0.1)
+        device = self.audio if control is not None else self.control
         try:
-            if not os.path.samestat(os.fstat(port.fileno()), os.stat(device)):
-                raise ModemError("USB device changed during open")
+            if control is not None:
+                verify_open_device(control.fileno(), self.control)
+        except (OSError, ModemError):
+            raise ModemError("Cannot establish the verified USB control port") from None
+        port = open_serial(device, timeout=FRAME_SECONDS if control is not None else 0.1)
+        try:
+            verify_open_device(port.fileno(), device)
             if self.validate() != parent:
                 raise ModemError("USB device changed during open")
+            if control is not None:
+                verify_open_device(control.fileno(), self.control)
         except (OSError, ModemError):
             with suppress(OSError):
                 port.close()
             raise ModemError("Cannot establish the verified USB port") from None
         return cast(SerialPort, port)
+
+
+def verify_open_device(fd: int, device: str) -> None:
+    if not os.path.samestat(os.fstat(fd), os.stat(device)):
+        raise ModemError("USB device changed during open")
 
 
 class SerialPcm:
@@ -98,10 +109,15 @@ class SerialPcm:
         self._closing: asyncio.Task[None] | None = None
         self._task = asyncio.create_task(self._run())
 
-    def _exchange(self, frame: bytes, read_size: int) -> bytes:
+    def _exchange(self, frame: bytes) -> bytes:
         try:
             if self._port.write(frame) != MODEM_FRAME_BYTES:
                 raise AudioError("Incomplete SIM7600 PCM write")
+            # Read existing backlog as well as the next frame, without letting
+            # delayed input accumulate in the kernel or this process.
+            read_size = max(MODEM_FRAME_BYTES, self._port.in_waiting)
+            if read_size > QUEUE_FRAMES * MODEM_FRAME_BYTES:
+                raise AudioError("SIM7600 PCM capture fell behind")
             result = self._port.read(read_size)
             if len(result) > read_size:
                 raise AudioError("Invalid SIM7600 PCM read size")
@@ -127,20 +143,19 @@ class SerialPcm:
                 frame, self._output_state = audioop.ratecv(
                     playback.ljust(FRAME_BYTES, b"\0"), 2, 1, RATE, MODEM_RATE, self._output_state
                 )
-                pending.extend(
-                    await asyncio.to_thread(self._exchange, frame, MODEM_FRAME_BYTES - len(pending))
-                )
+                pending.extend(await asyncio.to_thread(self._exchange, frame))
                 self._writing = False
-                if len(pending) == MODEM_FRAME_BYTES:
+                while len(pending) >= MODEM_FRAME_BYTES:
+                    captured = pending[:MODEM_FRAME_BYTES]
+                    del pending[:MODEM_FRAME_BYTES]
                     # Seed the resampler with the first sample so the initial frame
                     # has the same duration as every subsequent frame.
                     first = input_state is None
-                    source = pending[:2] + pending if first else pending
+                    source = captured[:2] + captured if first else captured
                     converted, input_state = audioop.ratecv(
                         source, 2, 1, MODEM_RATE, RATE, input_state
                     )
                     self._capture.append(converted[2:] if first else converted)
-                    pending.clear()
                 self._changed.set()
                 deadline = max(deadline + FRAME_SECONDS, loop.time())
         finally:
@@ -200,8 +215,8 @@ class SerialPcm:
         await asyncio.shield(self._closing)
 
 
-async def open_pcm_audio(ports: VoicePorts) -> SerialPcm:
-    opening = asyncio.create_task(asyncio.to_thread(ports.open, audio=True))
+async def open_pcm_audio(ports: VoicePorts, control: ATChannel) -> SerialPcm:
+    opening = asyncio.create_task(asyncio.to_thread(ports.open, control=control))
     try:
         port = await asyncio.shield(opening)
     except asyncio.CancelledError:

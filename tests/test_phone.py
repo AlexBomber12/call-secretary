@@ -158,6 +158,7 @@ def test_serial_audio_is_activated_after_answer_and_closed_for_local_fallback(
     settings, monkeypatch, disable_failure
 ):
     control = Control()
+    control.channel = Mock()
     timeline = []
 
     def enable(token):
@@ -176,8 +177,8 @@ def test_serial_audio_is_activated_after_answer_and_closed_for_local_fallback(
     options = replace(OPTIONS, pcm=phone.VoicePorts("control", "voice"))
     endpoints = [Endpoint(), Endpoint()]
 
-    async def open_pcm(ports):
-        assert ports == options.pcm
+    async def open_pcm(ports, channel):
+        assert ports == options.pcm and channel is control.channel
         timeline.append("open")
         if timeline.count("open") == 2:
             assert endpoints[0].closed
