@@ -181,6 +181,7 @@ def render(
     states = {
         "ru": {
             "caller_hangup": "завершён звонящим",
+            "caller_hangup_text_incomplete": "завершён звонящим, часть текста не распознана",
             "ended": "завершён",
             "interrupted": "прерван",
             "duration_limit": "лимит времени",
@@ -195,6 +196,7 @@ def render(
         },
         "it": {
             "caller_hangup": "terminata dal chiamante",
+            "caller_hangup_text_incomplete": "terminata dal chiamante, trascrizione incompleta",
             "ended": "conclusa",
             "interrupted": "interrotta",
             "duration_limit": "limite di durata",
@@ -206,6 +208,7 @@ def render(
         },
         "en": {
             "caller_hangup": "ended by caller",
+            "caller_hangup_text_incomplete": "ended by caller, incomplete transcript",
             "ended": "completed",
             "interrupted": "interrupted",
             "duration_limit": "duration limit",

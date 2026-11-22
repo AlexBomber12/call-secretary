@@ -7,7 +7,6 @@ from dataclasses import replace
 import pytest
 from test_voice import Endpoint, Hooks, Socket
 
-from call_secretary import voice as module
 from call_secretary.voice import Realtime, ToolReply, VoiceError, connect_api
 
 
@@ -195,19 +194,122 @@ def test_completed_tools_update_profile_and_finish_after_playback(rates):
     asyncio.run(scenario())
 
 
-def test_finish_waits_bounded_time_for_missing_transcription(rates, monkeypatch):
+def test_finish_waits_bounded_time_for_missing_transcription(rates):
     async def scenario():
         voice = Realtime(Socket(), Endpoint(), Hooks(), rates, "p", [], "v")
+        voice.transcription_grace = 0.01
         voice.committed_items.add("missing")
-        sleeps = []
-
-        async def sleep(seconds):
-            sleeps.append(seconds)
-
-        monkeypatch.setattr(module.asyncio, "sleep", sleep)
-        await voice._finish_after_playback()
-        assert sleeps.count(0.1) == 20
+        await asyncio.wait_for(voice._finish_after_playback(), 0.5)
         assert voice.finish_event.is_set()
+        assert not voice.transcript_complete
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("report", ["completed", "failed", "missing"])
+def test_disconnection_waits_only_for_known_committed_transcripts(rates, report):
+    class InterruptSignal(Endpoint):
+        def __init__(self):
+            super().__init__()
+            self.stopped = asyncio.Event()
+
+        async def interrupt(self):
+            self.stopped.set()
+
+    async def scenario():
+        socket, endpoint, hooks = Socket(), InterruptSignal(), Hooks()
+        voice = Realtime(socket, endpoint, hooks, rates, "p", [], "v")
+        voice.ready = True
+        voice.transcription_grace = 0.05
+        await voice.handle({"type": "input_audio_buffer.committed", "item_id": "wanted"})
+        sent = list(socket.sent)
+        draining = asyncio.create_task(voice.drain_after_disconnect())
+        await asyncio.wait_for(endpoint.stopped.wait(), 0.5)
+        await voice.close_soon()
+        await voice.send({"type": "input_audio_buffer.append", "audio": "AAA="})
+        await voice.handle(done("late-response"))
+        assert hooks.usages == [("late-response", {})]
+        await voice.handle({"type": "input_audio_buffer.committed", "item_id": "unwanted"})
+        await voice.handle(
+            {"type": "response.output_audio.delta", "item_id": "late", "delta": "AAA="}
+        )
+
+        async def send_transcript(item, kind):
+            await voice.handle(
+                {
+                    "type": "conversation.item.input_audio_transcription." + kind,
+                    "item_id": item,
+                    "transcript": "synthetic words",
+                }
+            )
+
+        await send_transcript("unwanted", "completed")
+        await send_transcript("unwanted", "failed")
+        assert not draining.done()
+        if report != "missing":
+            await send_transcript("wanted", report)
+        await asyncio.wait_for(draining, 0.5)
+        assert voice.transcript_complete == (report == "completed")
+        assert [t[0] for t in hooks.texts] == (["wanted"] if report == "completed" else [])
+        assert voice.committed_items == {"wanted"}
+        assert socket.sent == sent
+        assert voice.playback.queue.empty()
+
+    asyncio.run(scenario())
+
+
+def test_disconnection_before_handshake_does_not_access_playback_and_drops_capture(rates):
+    class Audio(Endpoint):
+        async def read(self):
+            return b"\\0\\0"
+
+    async def scenario():
+        socket, endpoint = Socket(), Audio()
+        voice = Realtime(socket, endpoint, Hooks(), rates, "p", [], "v")
+        await voice.drain_after_disconnect()
+        voice.finish_event.set()
+        await asyncio.wait_for(voice._capture(), 0.5)
+        assert voice.input_bytes == 0 and socket.sent == []
+        assert endpoint.interrupts == 0
+
+    asyncio.run(scenario())
+
+
+def test_remote_drain_bounds_unresponsive_playback_shutdown(rates):
+    class Audio(Endpoint):
+        async def interrupt(self):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        voice = Realtime(Socket(), Audio(), Hooks(), rates, "p", [], "v")
+        voice.ready = True
+        voice.cleanup_timeout = 0.01
+        with pytest.raises(VoiceError, match="Audio cleanup timed out"):
+            await asyncio.wait_for(voice.drain_after_disconnect(), 0.5)
+
+    asyncio.run(scenario())
+
+
+def test_only_the_matching_cancel_race_is_recoverable(rates):
+    async def scenario():
+        socket, hooks = Socket(), Hooks()
+        voice = Realtime(socket, Endpoint(), hooks, rates, "p", [], "v")
+        await voice.request_response()
+        await voice.handle({"type": "response.created", "response": {"id": "r1"}})
+        await voice.close_soon()
+        cancelled = socket.sent[-1]
+        assert cancelled["type"] == "response.cancel"
+        assert cancelled["response_id"] == "r1"
+        await voice.close_soon()
+        assert socket.sent.count(cancelled) == 1
+        await voice.handle(done("r1"))
+        assert voice.active_response_id is None
+        assert voice.pending and voice.responses == 2
+        error = {"code": "response_cancel_not_active", "event_id": cancelled["event_id"]}
+        await voice.handle({"type": "error", "error": error})
+        assert voice.pending and voice.usage_complete
+        with pytest.raises(VoiceError, match="rejected"):
+            await voice.handle({"type": "error", "error": error | {"event_id": "unrelated"}})
 
     asyncio.run(scenario())
 

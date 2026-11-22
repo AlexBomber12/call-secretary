@@ -58,6 +58,18 @@ def test_profile_prompt_excludes_other_profiles_and_private_destinations():
     assert "Pronto" in prompt
 
 
+@pytest.mark.parametrize("state", ["unresolved", "selected", "disputed"])
+def test_interview_instructions_ask_for_action_clarification_and_confirmation(family, state):
+    prompt = Router(family).instructions(
+        family.profiles[0] if state == "selected" else None, disputed=state == "disputed"
+    )
+    assert "una domanda alla volta" in prompt
+    assert "quale azione si aspetta" in prompt
+    assert "scadenza" in prompt
+    assert "chiedi conferma senza indovinare" in prompt
+    assert "eventuali correzioni" in prompt
+
+
 def test_disabled_profile_cannot_be_selected():
     family = family_with_routes()
     family = replace(family, profiles=(replace(family.profiles[0], enabled=False),))

@@ -272,6 +272,13 @@ def test_call_lifecycle_limits_fallback_hangup_usb_and_billing(
         async def close_soon(self):
             self.closing = True
 
+        @property
+        def transcript_complete(self):
+            return self.committed_items <= self.transcribed_items
+
+        async def drain_after_disconnect(self):
+            pass
+
         async def run(self):
             await self.call.text("caller", "caller", "Synthetic request", False, 1)
             if outcome in {"hangup", "replacement"}:
@@ -331,6 +338,102 @@ def test_call_lifecycle_limits_fallback_hangup_usb_and_billing(
                 # only an actual attempt may leave usage unknown.
                 assert call["voice_usage_complete"] == int(not connects)
             await SummaryWorker(store, family).process_one()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("transcription", ["completed", "failed", "socket_lost", "early"])
+def test_caller_hangup_keeps_late_committed_words_and_stops_voice_output(settings, transcription):
+    async def scenario():
+        control = Control()
+        disconnected = asyncio.Event()
+
+        class Audio(Endpoint):
+            async def interrupt(self):
+                disconnected.set()
+                await super().interrupt()
+
+        class ProviderSocket:
+            def __init__(self):
+                self.sent = []
+                self.inputs = iter(
+                    [
+                        {"type": "session.updated"},
+                        {
+                            "type": "response.done",
+                            "response": {"id": "hello", "status": "completed", "usage": USAGE},
+                        },
+                        {"type": "input_audio_buffer.committed", "item_id": "message"},
+                    ]
+                )
+                self.reported = False
+
+            async def send(self, message):
+                self.sent.append(json.loads(message))
+
+            async def recv(self):
+                event = next(self.inputs, None)
+                if event is not None:
+                    return json.dumps(event)
+                if not self.reported:
+                    self.reported = True
+                    control.current = None
+                    await disconnected.wait()
+                    if transcription == "socket_lost":
+                        raise OSError("synthetic loss after caller hangup")
+                    return json.dumps(
+                        {
+                            "type": "conversation.item.input_audio_transcription." + transcription,
+                            "item_id": "message",
+                            "transcript": "Final synthetic instruction",
+                        }
+                    )
+                await asyncio.Event().wait()
+
+        endpoint, provider = Audio(), ProviderSocket()
+
+        async def open_audio(spec):
+            return endpoint
+
+        @asynccontextmanager
+        async def connect(key, model):
+            if transcription == "early":
+                control.current = None
+                await asyncio.Event().wait()
+            yield provider
+
+        with Store(settings.state_dir, mode="live") as store:
+            cid = await asyncio.wait_for(
+                phone.handle_call(
+                    settings,
+                    store,
+                    OPTIONS,
+                    control,
+                    OBSERVED,
+                    bytes(960),
+                    audio_factory=open_audio,
+                    connector=connect,
+                ),
+                timeout=3,
+            )
+            status = (
+                "caller_hangup"
+                if transcription in {"completed", "early"}
+                else "caller_hangup_text_incomplete"
+            )
+            assert store.call(cid)["status"] == status
+            assert [row["text"] for row in store.transcript(cid)] == (
+                ["Final synthetic instruction"] if transcription == "completed" else []
+            )
+            assert store.counts()["summary_pending"] == 1
+        assert endpoint.interrupted == (transcription != "early")
+        assert endpoint.closed and not endpoint.output
+        expected_events = (
+            []
+            if transcription == "early"
+            else ["session.update", "response.create", "response.create"]
+        )
+        assert [event["type"] for event in provider.sent] == expected_events
 
     asyncio.run(scenario())
 

@@ -149,13 +149,12 @@ async def modem_audio_test(ports: VoicePorts) -> int:
             raise
 
 
-async def race_call(operation: Coroutine[Any, Any, None], watch: Coroutine[Any, Any, None]) -> bool:
+async def race_call(operation: Coroutine[Any, Any, None], watch: Coroutine[Any, Any, None]) -> None:
     tasks = [asyncio.create_task(operation), asyncio.create_task(watch)]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
-        return tasks[1] in done  # Ended or replaced by a different logical call.
     finally:
         for task in tasks:
             task.cancel()
@@ -182,16 +181,21 @@ async def handle_call(
     rates: RateCard | None = None
     attempted = False
     pcm_attempted = False
+    caller_left = False
     audio_ok = False
     status = "interrupted"
     deadline = call.started + settings.family.max_duration_seconds
 
     async def watch() -> None:
+        nonlocal caller_left
         while True:
             await asyncio.sleep(0.5)
             current = await asyncio.to_thread(control.poll)
             health.update(store, "modem", "active")
             if current is None or current.token != observed.token:
+                caller_left = True
+                if voice is not None:
+                    await voice.drain_after_disconnect()
                 return
 
     async def open_audio() -> AudioEndpoint:
@@ -244,11 +248,7 @@ async def handle_call(
                 monitor = asyncio.create_task(call.monitor(voice))
                 try:
                     await voice.run()
-                    status = (
-                        "ended"
-                        if voice.committed_items <= voice.transcribed_items
-                        else "ended_text_incomplete"
-                    )
+                    status = "ended" if voice.transcript_complete else "ended_text_incomplete"
                 finally:
                     closer.cancel()
                     monitor.cancel()
@@ -256,6 +256,8 @@ async def handle_call(
         except FatalAudioError:
             raise  # Never recover while a native worker may still own hardware.
         except Exception as exc:
+            if caller_left:
+                return
             status = "budget_refused" if isinstance(exc, BudgetError) else "provider_or_audio_error"
             health.update(store, "voice", "unavailable")
             # The watcher remains active while the local prompt plays.
@@ -272,8 +274,13 @@ async def handle_call(
 
     try:
         async with asyncio.timeout(max(0, deadline - time.monotonic())):
-            if await race_call(converse(), watch()):
-                status = "caller_hangup"
+            await race_call(converse(), watch())
+            if caller_left:
+                status = (
+                    "caller_hangup_text_incomplete"
+                    if voice is not None and not voice.transcript_complete
+                    else "caller_hangup"
+                )
     except TimeoutError:
         status = "duration_limit"
     except FatalAudioError:
@@ -318,7 +325,13 @@ async def handle_call(
                     "audio",
                     "idle" if audio_ok and status != "audio_error" else "unavailable",
                 )
-                if status in {"ended", "ended_text_incomplete", "caller_hangup", "duration_limit"}:
+                if status in {
+                    "ended",
+                    "ended_text_incomplete",
+                    "caller_hangup",
+                    "caller_hangup_text_incomplete",
+                    "duration_limit",
+                }:
                     health.update(store, "voice", "idle")
     return call.cid
 

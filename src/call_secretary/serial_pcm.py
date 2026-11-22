@@ -105,6 +105,7 @@ class SerialPcm:
         self._changed = asyncio.Event()
         self._stop = asyncio.Event()
         self._writing = False
+        self._playback_generation = 0
         self._output_state: Any = None
         self._closing: asyncio.Task[None] | None = None
         self._task = asyncio.create_task(self._run())
@@ -181,12 +182,16 @@ class SerialPcm:
     async def write(self, pcm: bytes) -> None:
         if not 0 < len(pcm) <= FRAME_BYTES or len(pcm) % 2:
             raise AudioError("Invalid PCM16 playback frame")
+        generation = self._playback_generation
         while len(self._playback) + len(pcm) > QUEUE_FRAMES * FRAME_BYTES:
             await self._wait()
+            if generation != self._playback_generation:
+                return
         self._check()
         self._playback.extend(pcm)
 
     async def interrupt(self) -> None:
+        self._playback_generation += 1
         self._playback.clear()
         self._output_state = None
         self._changed.set()
