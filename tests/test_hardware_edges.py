@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -117,3 +118,18 @@ def test_windows_lock_initializes_the_lock_byte_once_on_either_platform(tmp_path
     acquire.side_effect = OSError("busy")
     with pytest.raises(RuntimeError, match="Another"):
         locking.InstanceLock(path).__enter__()
+
+
+@pytest.mark.parametrize(
+    "error", [OSError("private details"), subprocess.TimeoutExpired("private", 5)]
+)
+def test_ownership_probe_failure_is_a_sanitized_modem_error(monkeypatch, error):
+    import serial
+
+    monkeypatch.setattr(modem, "check_device", Mock(side_effect=error))
+    serial_open = Mock()
+    monkeypatch.setattr(serial, "Serial", serial_open)
+    with pytest.raises(ModemError, match="ownership") as caught:
+        modem.open_serial("synthetic")
+    assert "private" not in str(caught.value)
+    serial_open.assert_not_called()

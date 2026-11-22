@@ -6,6 +6,7 @@ import asyncio
 import signal
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -59,12 +60,17 @@ class PhoneOptions:
 
 def open_control(device: str) -> CallControl:
     port = open_serial(device)
+    channel = ATChannel(port)
     try:
         if not any("SIM7600" in line for line in at_query(port, "AT+CGMM")):
             raise ModemError("Selected device is not a SIM7600; no call commands sent")
-        return CallControl(ATChannel(port))
+        return CallControl(channel)
+    except OSError:
+        with suppress(ModemError):
+            channel.close()
+        raise ModemError("Modem disconnected during model probe") from None
     except BaseException:
-        port.close()
+        channel.close()
         raise
 
 
