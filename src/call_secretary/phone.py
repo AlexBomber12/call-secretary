@@ -8,7 +8,6 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import Any
 
 from call_secretary import health
@@ -178,7 +177,6 @@ async def handle_call(
     call = CallController(store, settings.family, observed.incoming(options.ingress))
     endpoint: AudioEndpoint | None = None
     voice: Realtime | None = None
-    rates: RateCard | None = None
     attempted = False
     pcm_attempted = False
     caller_left = False
@@ -204,7 +202,7 @@ async def handle_call(
         return await audio_factory(options.audio)
 
     async def converse() -> None:
-        nonlocal voice, rates, attempted, status, endpoint, pcm_attempted
+        nonlocal voice, attempted, status, endpoint, pcm_attempted
         if options.pcm is None:
             endpoint = await open_audio()
         await answer_confirmed(control, observed.token)
@@ -307,18 +305,10 @@ async def handle_call(
                     await asyncio.to_thread(control.disable_pcm)
                 except ModemError:
                     health.update(store, "modem", "unavailable")
+            complete = False
             try:
-                if voice and rates:
-                    amount = Decimal(voice.input_bytes) / (24000 * 2 * 60)
-                    call.ledger.consume(
-                        call.cid,
-                        call.cid + ":transcription_allowance",
-                        amount * rates.transcription_usd_per_minute * rates.usd_to_eur_upper_bound,
-                    )
+                complete = call.account_voice(voice)
             finally:
-                complete = not attempted or bool(
-                    voice and voice.usage_complete and status == "ended"
-                )
                 call.finish(status, usage_complete=complete)
                 health.update(
                     store,

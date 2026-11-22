@@ -16,6 +16,23 @@ def test_invalid_cost_is_never_accounted(value):
         units(value)
 
 
+def test_paid_summary_approval_reserves_once_and_rolls_back_when_budget_is_full(tmp_path):
+    with Store(tmp_path / "state") as store:
+        ledger = Ledger(store, Decimal(50))
+        cid = store.create_call("fake")
+        store.end_call(cid)
+        token = store.claim_job("summary_jobs")["lease_token"]
+        with pytest.raises(BudgetError, match="free reservation"):
+            ledger.reserve_summary_attempt(cid, token, Decimal(51))
+        assert not store.db.execute(
+            "SELECT 1 FROM metadata WHERE key=?", ("summary_attempt:" + cid,)
+        ).fetchone()
+        assert ledger.status()["committed_eur"] == "0"
+        assert ledger.reserve_summary_attempt(cid, token, Decimal(2))
+        assert not ledger.reserve_summary_attempt(cid, token, Decimal(4))
+        assert ledger.status()["committed_eur"] == "2"
+
+
 def test_ledger_refuses_unreserved_closed_or_unknown_paid_work(tmp_path):
     with Store(tmp_path / "state") as store:
         ledger = Ledger(store, Decimal(50))

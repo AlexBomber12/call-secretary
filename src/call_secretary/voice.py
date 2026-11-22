@@ -127,7 +127,7 @@ class Realtime:
         self.pending = False
         self.user_pending = False
         self.ready = False
-        self.usage_complete = True
+        self._usage_uncertain = False
         self.interrupted_items: set[str] = set()
         self.discarded_items: set[str] = set()
         self.discarded_responses: set[str] = set()
@@ -193,6 +193,10 @@ class Realtime:
                 await self.send(event)
         else:
             await self.request_response()
+
+    @property
+    def usage_complete(self) -> bool:
+        return not self.pending and not self._usage_uncertain
 
     @property
     def transcript_complete(self) -> bool:
@@ -373,27 +377,30 @@ class Realtime:
             self._interrupt_before_created = False
             if self.active_response_id == rid:
                 self.active_response_id = None
-            self.pending = False
             output = response.get("output", [])
-            holds: dict[int, ToolReply] = {}
-            if response.get("status") == "completed" and rid not in self.discarded_responses:
-                # Record the delivery hold before billing or a finish tool can end the call.
-                for index, item in enumerate(output):
-                    if (
-                        item.get("type") == "function_call"
-                        and item.get("name") == REPORT_RECIPIENT_CONFLICT
-                    ):
-                        holds[index] = await self._call_tool(item)
-            usage = response.get("usage")
-            if not isinstance(usage, dict):
-                self.usage_complete = False
-                raise VoiceError("Provider usage is unavailable; reservation remains held")
-            await self.hooks.usage(rid, usage)
+            try:
+                holds: dict[int, ToolReply] = {}
+                if response.get("status") == "completed" and rid not in self.discarded_responses:
+                    # Record the delivery hold before billing or a finish tool can end the call.
+                    for index, item in enumerate(output):
+                        if (
+                            item.get("type") == "function_call"
+                            and item.get("name") == REPORT_RECIPIENT_CONFLICT
+                        ):
+                            holds[index] = await self._call_tool(item)
+                usage = response.get("usage")
+                if not isinstance(usage, dict):
+                    raise VoiceError("Provider usage is unavailable; reservation remains held")
+                await self.hooks.usage(rid, usage)
+            except BaseException:
+                # A response without a durable debit can have unknown provider costs.
+                self._usage_uncertain = True
+                raise
+            self.pending = False
             await self.hooks.activity()
             if self.disconnected:
                 return
             if response.get("status") not in {"completed", "cancelled"}:
-                self.usage_complete = False
                 raise VoiceError("Voice response failed")
             if response.get("status") == "cancelled" or rid in self.discarded_responses:
                 if response.get("status") == "completed":
@@ -477,8 +484,6 @@ class Realtime:
             for task in done:
                 task.result()
         finally:
-            if self.pending:
-                self.usage_complete = False
             if self._finish_task:
                 self._finish_task.cancel()
             for task in tasks:

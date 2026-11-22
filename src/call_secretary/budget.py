@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
@@ -49,38 +50,74 @@ class Ledger:
         horizon_seconds: int = 660,
         incremental: bool = False,
     ) -> None:
-        now = now or datetime.now(UTC)
+        with self.store.transaction() as db:
+            self._reserve(
+                db,
+                cid,
+                amount,
+                now=now or datetime.now(UTC),
+                horizon_seconds=horizon_seconds,
+                incremental=incremental,
+            )
+
+    def reserve_summary_attempt(self, cid: str, token: str, amount: Decimal) -> bool:
+        """Authorize one paid request while the worker still owns the summary job."""
+        with self.store.transaction() as db:
+            now = datetime.now(UTC)
+            lease = db.execute(
+                "SELECT 1 FROM summary_jobs WHERE call_id=? AND state='leased' "
+                "AND lease_token=? AND lease_until>?",
+                (cid, token, now.timestamp()),
+            ).fetchone()
+            if lease is None:
+                return False
+            inserted = db.execute(
+                "INSERT INTO metadata VALUES(?,?) ON CONFLICT(key) DO NOTHING",
+                ("summary_attempt:" + cid, "started"),
+            ).rowcount
+            if not inserted:
+                return False
+            self._reserve(db, cid, amount, now=now, horizon_seconds=60, incremental=True)
+            return True
+
+    def _reserve(
+        self,
+        db: sqlite3.Connection,
+        cid: str,
+        amount: Decimal,
+        *,
+        now: datetime,
+        horizon_seconds: int,
+        incremental: bool,
+    ) -> None:
         months = {self.month(now), self.month(now + timedelta(seconds=horizon_seconds))}
         requested = units(amount)
         if requested <= 0:
             raise BudgetError("A positive reservation is required")
-        with self.store.transaction() as db:
-            for month in months:
-                current = db.execute(
-                    "SELECT * FROM budget_reservations WHERE call_id=? AND month=?", (cid, month)
-                ).fetchone()
-                if current and current["closed"]:
-                    raise BudgetError("Settled calls cannot make additional paid requests")
-                previous = max(current["reserved"], current["consumed"]) if current else 0
-                # Follow-up work needs its full allowance above already consumed
-                # usage, including when the provider exceeded the original hold.
-                additional = current["consumed"] if current and incremental else 0
-                wanted = max(requested + additional, previous)
-                total = db.execute(
-                    "SELECT COALESCE(SUM(CASE WHEN closed=1 THEN consumed "
-                    "ELSE MAX(reserved,consumed) END),0) "
-                    "FROM budget_reservations WHERE month=?",
-                    (month,),
-                ).fetchone()[0]
-                if total - previous + wanted > self.limit:
-                    raise BudgetError(
-                        "Monthly family API budget has no sufficient free reservation"
-                    )
-                db.execute(
-                    "INSERT INTO budget_reservations(call_id,month,reserved) VALUES(?,?,?) "
-                    "ON CONFLICT(call_id,month) DO UPDATE SET reserved=excluded.reserved",
-                    (cid, month, wanted),
-                )
+        for month in months:
+            current = db.execute(
+                "SELECT * FROM budget_reservations WHERE call_id=? AND month=?", (cid, month)
+            ).fetchone()
+            if current and current["closed"]:
+                raise BudgetError("Settled calls cannot make additional paid requests")
+            previous = max(current["reserved"], current["consumed"]) if current else 0
+            # Follow-up work needs its full allowance above already consumed
+            # usage, including when the provider exceeded the original hold.
+            additional = current["consumed"] if current and incremental else 0
+            wanted = max(requested + additional, previous)
+            total = db.execute(
+                "SELECT COALESCE(SUM(CASE WHEN closed=1 THEN consumed "
+                "ELSE MAX(reserved,consumed) END),0) "
+                "FROM budget_reservations WHERE month=?",
+                (month,),
+            ).fetchone()[0]
+            if total - previous + wanted > self.limit:
+                raise BudgetError("Monthly family API budget has no sufficient free reservation")
+            db.execute(
+                "INSERT INTO budget_reservations(call_id,month,reserved) VALUES(?,?,?) "
+                "ON CONFLICT(call_id,month) DO UPDATE SET reserved=excluded.reserved",
+                (cid, month, wanted),
+            )
 
     def consume(self, cid: str, event_id: str, amount: Decimal) -> bool:
         cost = units(amount)

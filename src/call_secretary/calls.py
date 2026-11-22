@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+from decimal import Decimal
 from typing import Any
 
+from call_secretary.audio import RATE
 from call_secretary.budget import BudgetError, Ledger, RateCard
 from call_secretary.config import ConfigError, Family, Profile
 from call_secretary.routing import REPORT_RECIPIENT_CONFLICT, Incoming, Router
@@ -129,6 +131,20 @@ class CallController:
                 await asyncio.sleep(10)
                 voice.finish_event.set()
                 return
+
+    def account_voice(self, voice: Realtime | None) -> bool:
+        if voice is None:
+            # No session sent any potentially billable requests.
+            return True
+        assert self.rates is not None
+        minutes = Decimal(voice.input_bytes) / (RATE * 2 * 60)
+        allowance = minutes * self.rates.transcription_usd_per_minute
+        covered = self.ledger.consume(
+            self.cid,
+            self.cid + ":transcription_allowance",
+            allowance * self.rates.usd_to_eur_upper_bound,
+        )
+        return covered and voice.usage_complete
 
     def finish(self, status: str = "ended", *, usage_complete: bool = False) -> None:
         if self.ended:

@@ -168,6 +168,80 @@ def test_attempt_marker_survives_crash_and_blocks_duplicate_paid_generation(
     asyncio.run(scenario())
 
 
+def test_worker_with_expired_lease_cannot_start_a_paid_summary(
+    tmp_path, family, rates, monkeypatch
+):
+    async def scenario():
+        path = tmp_path / "state"
+        with Store(path) as old, Store(path) as new:
+            cid = await simulate(old, family, "member_a", "Synthetic message")
+            provider = Provider()
+            worker = SummaryWorker(old, family, provider=provider, rates=rates)
+            current = type(rates).assert_current
+
+            def reclaim(card, *args, **kwargs):
+                current(card, *args, **kwargs)
+                with new.transaction() as db:
+                    db.execute("UPDATE summary_jobs SET lease_until=0 WHERE call_id=?", (cid,))
+                assert new.claim_job("summary_jobs")["call_id"] == cid
+
+            with monkeypatch.context() as patch:
+                patch.setattr(type(rates), "assert_current", reclaim)
+                assert await worker.process_one()
+            assert provider.calls == 0
+            assert not old.db.execute("SELECT * FROM budget_reservations").fetchall()
+            assert not old.db.execute(
+                "SELECT 1 FROM metadata WHERE key=?", ("summary_attempt:" + cid,)
+            ).fetchone()
+            with new.transaction() as db:
+                db.execute("UPDATE summary_jobs SET lease_until=0 WHERE call_id=?", (cid,))
+            assert await SummaryWorker(new, family, provider=provider, rates=rates).process_one()
+            assert provider.calls == 1 and new.counts()["summary_pending"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_new_summary_lease_during_paid_request_uses_fallback_and_retains_hold(
+    tmp_path, family, rates
+):
+    class BlockedProvider(Provider):
+        def __init__(self):
+            super().__init__()
+            self.started, self.finish = asyncio.Event(), asyncio.Event()
+
+        async def generate(self, payload, language):
+            answer = await super().generate(payload, language)
+            self.started.set()
+            await self.finish.wait()
+            return answer
+
+    async def scenario():
+        path = tmp_path / "state"
+        with Store(path) as old, Store(path) as new:
+            cid = await simulate(old, family, "member_a", "Synthetic message")
+            provider = BlockedProvider()
+            worker = SummaryWorker(old, family, provider=provider, rates=rates)
+            first = asyncio.create_task(worker.process_one())
+            try:
+                await asyncio.wait_for(provider.started.wait(), 1)
+                with new.transaction() as db:
+                    db.execute("UPDATE summary_jobs SET lease_until=0 WHERE call_id=?", (cid,))
+                assert await SummaryWorker(
+                    new, family, provider=provider, rates=rates
+                ).process_one()
+                assert provider.calls == 1 and new.counts()["summary_pending"] == 0
+                reserved = new.db.execute(
+                    "SELECT reserved,closed FROM budget_reservations"
+                ).fetchone()
+                assert reserved["reserved"] > 0 and not reserved["closed"]
+            finally:
+                provider.finish.set()
+                await asyncio.wait_for(first, 1)
+            assert provider.calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_corrupt_checkpoint_is_retried_without_losing_the_job(tmp_path, family, rates):
     async def scenario():
         with Store(tmp_path / "state") as store:

@@ -16,14 +16,15 @@ from call_secretary.voice import VoiceError
     "outcome,expected,complete",
     [
         ("ok", "ended", True),
-        ("missing_text", "ended_text_incomplete", False),
+        ("missing_text", "ended_text_incomplete", True),
         ("timeout", "duration_limit", False),
         ("provider", "provider_or_audio_error", False),
+        ("provider_billed", "provider_or_audio_error", True),
         ("open", "provider_or_audio_error", True),
-        ("close", "audio_error", False),
-        ("connect", "provider_or_audio_error", False),
+        ("close", "audio_error", True),
+        ("connect", "provider_or_audio_error", True),
         ("fatal_open", "audio_error", True),
-        ("fatal_close", "audio_error", False),
+        ("fatal_close", "audio_error", True),
     ],
 )
 def test_runtime_persists_final_state_and_keeps_unknown_cost(
@@ -55,7 +56,7 @@ def test_runtime_persists_final_state_and_keeps_unknown_cost(
     class Session:
         def __init__(self, *args):
             self.transcript_complete = outcome != "missing_text"
-            self.usage_complete = True
+            self.usage_complete = outcome not in {"provider", "timeout"}
             self.input_bytes = 48000
             sessions.append(self)
 
@@ -66,7 +67,7 @@ def test_runtime_persists_final_state_and_keeps_unknown_cost(
             await asyncio.sleep(0.001)
             if outcome == "timeout":
                 raise TimeoutError
-            if outcome == "provider":
+            if outcome in {"provider", "provider_billed"}:
                 raise VoiceError("synthetic provider failure")
 
     class Timer:
