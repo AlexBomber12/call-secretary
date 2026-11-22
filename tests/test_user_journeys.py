@@ -536,7 +536,8 @@ def test_long_generated_report_keeps_limit_warning_route_and_status_after_restar
             assert warning[language] in result["report"]
             assert route[language] in result["report"]
             assert status[language] in result["report"]
-            assert all(label + ":" in result["report"] for label in LABELS[language][3:10])
+            assert LABELS[language]["callback"] + ":" in result["report"]
+            assert "X" * 1000 in result["report"]
             assert "…" in result["report"]
             assert cid in result["report"] and len(result["report"]) <= 4000
             assert sum(len(r["text"]) for r in store.transcript(cid)) == 80000

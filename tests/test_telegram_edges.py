@@ -191,7 +191,7 @@ def test_worker_group_retries_transient_poll_errors_then_stops_on_auth_failure(
             counts["summary"] += 1
 
     class Delivery:
-        def __init__(self, *args):
+        def __init__(self, *args, **kwargs):
             pass
 
         async def process_one(self):

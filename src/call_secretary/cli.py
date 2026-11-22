@@ -139,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
             from call_secretary.telegram import TelegramClient, run_workers
 
             settings.require("TELEGRAM_BOT_TOKEN")
+            operator_chat = settings.env.get("ADMIN_TELEGRAM_CHAT_ID")
             worker_provider, worker_rates = None, None
             if not args.offline_summaries and settings.env.get("OPENAI_API_KEY"):
                 try:
@@ -162,8 +163,13 @@ def main(argv: list[str] | None = None) -> int:
                             settings.family,
                             client,
                             SummaryWorker(
-                                store, settings.family, provider=worker_provider, rates=worker_rates
+                                store,
+                                settings.family,
+                                provider=worker_provider,
+                                rates=worker_rates,
+                                operator_chat=operator_chat,
                             ),
+                            operator_chat=operator_chat,
                         )
                 finally:
                     await client.close()
@@ -233,7 +239,15 @@ def main(argv: list[str] | None = None) -> int:
                 rates = RateCard.load(settings.env)
                 provider = OpenAISummary(settings.env["OPENAI_API_KEY"], model=rates.summary_model)
             with Store(settings.state_dir, mode=None if args.offline else "live") as store:
-                worker = SummaryWorker(store, settings.family, provider=provider, rates=rates)
+                worker = SummaryWorker(
+                    store,
+                    settings.family,
+                    provider=provider,
+                    rates=rates,
+                    operator_chat=None
+                    if args.offline
+                    else settings.env.get("ADMIN_TELEGRAM_CHAT_ID"),
+                )
                 processed = asyncio.run(worker.process_one())
                 print(json.dumps({"processed_summary": processed, **store.counts()}))
             return 0

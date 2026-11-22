@@ -86,7 +86,7 @@ def test_cli_worker_always_closes_its_client(command, settings, monkeypatch, off
         async def close(self):
             self.closed = True
 
-    async def work(store, family, client, worker):
+    async def work(store, family, client, worker, *, operator_chat):
         assert bool(worker.provider) is not offline
 
     monkeypatch.setattr(telegram, "TelegramClient", Client)

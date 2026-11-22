@@ -51,7 +51,7 @@ def test_report_preserves_uncertainty_instead_of_claiming_a_fact(family):
         summary,
         family.timezone,
     )
-    assert "? ?" in text and "call tomorrow" in text
+    assert "Осталось уточнить: ?" in text and "call tomorrow" in text
 
 
 @pytest.mark.parametrize(
@@ -72,6 +72,11 @@ def test_summary_http_contract_is_bounded_private_and_structured(monkeypatch, st
         else:
             assert "reasoning" not in payload and "prompt_cache_options" not in payload
         assert payload["text"]["format"]["strict"] is True
+        assert "narrative" in payload["text"]["format"]["schema"]["required"]
+        assert (
+            "Never format the recap as a list of questions and answers"
+            in (payload["input"][0]["content"])
+        )
         return httpx.Response(
             200,
             json={

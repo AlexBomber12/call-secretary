@@ -14,7 +14,7 @@ import httpx
 from call_secretary import health
 from call_secretary.config import ConfigError, Family, chat_id
 from call_secretary.http_io import json_body
-from call_secretary.storage import Store
+from call_secretary.storage import OPERATOR_ALERT_PROFILE, Store
 
 
 class TelegramError(RuntimeError):
@@ -61,7 +61,7 @@ class TelegramClient:
         await self._http.aclose()
 
     async def request(self, method: str, payload: dict[str, Any]) -> Any:
-        if method not in {"getMe", "getUpdates", "sendMessage", "getWebhookInfo"}:
+        if method not in {"getMe", "getUpdates", "sendMessage", "getWebhookInfo", "getChat"}:
             raise TelegramError(400)
         try:
             async with asyncio.timeout(30):
@@ -131,8 +131,8 @@ class Enrollment:
             db.execute("DELETE FROM invitations WHERE profile_id=?", (pid,))
             db.execute(
                 "UPDATE outbox SET chat_id=?,state='pending',not_before=0 "
-                "WHERE profile_id=? AND state='waiting_destination'",
-                (target, pid),
+                "WHERE profile_id=? AND state='waiting_destination' AND (chat_id='' OR chat_id=?)",
+                (target, pid, target),
             )
         return True
 
@@ -178,41 +178,64 @@ class Enrollment:
                     "UPDATE outbox SET chat_id=(SELECT chat_id FROM bindings WHERE profile_id=?),"
                     "state='pending',not_before=0 WHERE profile_id=? "
                     "AND state='waiting_destination' AND EXISTS "
-                    "(SELECT 1 FROM bindings WHERE profile_id=? AND enabled=1)",
+                    "(SELECT 1 FROM bindings WHERE profile_id=? AND enabled=1 "
+                    "AND (outbox.chat_id='' OR outbox.chat_id=bindings.chat_id))",
                     (p.id, p.id, p.id),
                 )
 
 
 class DeliveryWorker:
-    def __init__(self, store: Store, family: Family, api: TelegramAPI):
+    def __init__(
+        self,
+        store: Store,
+        family: Family,
+        api: TelegramAPI,
+        *,
+        operator_chat: str | None = None,
+    ):
         self.store, self.family, self.api = store, family, api
+        self.operator_chat = chat_id(operator_chat, "Operator chat")
 
     async def process_one(self, *, now: float | None = None) -> bool:
         row = self.store.claim_job("outbox", now=now)
         if row is None:
             return False
         oid, token = row["id"], row["lease_token"]
-        try:
-            profile = self.family.profile(row["profile_id"])
-        except ConfigError:
-            self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
-            return True
-        with self.store.transaction() as db:
-            binding = db.execute(
-                "SELECT * FROM bindings WHERE profile_id=?", (profile.id,)
-            ).fetchone()
-        if not binding or binding["chat_id"] != row["chat_id"]:
-            self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
-            return True
-        if not profile.enabled or not binding["enabled"]:
+        operator = row["profile_id"] == OPERATOR_ALERT_PROFILE
+        if operator:
+            if not self.operator_chat or row["chat_id"] != self.operator_chat:
+                self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
+                return True
+        else:
+            try:
+                profile = self.family.profile(row["profile_id"])
+            except ConfigError:
+                self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
+                return True
             with self.store.transaction() as db:
-                db.execute(
-                    "UPDATE outbox SET state='waiting_destination',lease_token=NULL,lease_until=0 "
-                    "WHERE id=? AND lease_token=?",
-                    (oid, token),
-                )
-            return True
+                binding = db.execute(
+                    "SELECT * FROM bindings WHERE profile_id=?", (profile.id,)
+                ).fetchone()
+            if not binding or binding["chat_id"] != row["chat_id"]:
+                self.store.retry_job("outbox", oid, token, 1, now=now, blocked=True)
+                return True
+            if not profile.enabled or not binding["enabled"]:
+                with self.store.transaction() as db:
+                    db.execute(
+                        "UPDATE outbox SET state='waiting_destination',lease_token=NULL,"
+                        "lease_until=0 WHERE id=? AND lease_token=?",
+                        (oid, token),
+                    )
+                return True
         try:
+            if operator:
+                chat = await self.api.request("getChat", {"chat_id": row["chat_id"]})
+                if (
+                    not isinstance(chat, dict)
+                    or chat.get("type") != "private"
+                    or str(chat.get("id")) != row["chat_id"]
+                ):
+                    raise TelegramError(400)
             await self.api.request("sendMessage", {"chat_id": row["chat_id"], "text": row["text"]})
             health.update(self.store, "telegram", "ready")
             self.store.delivery_complete(oid, token)
@@ -290,14 +313,33 @@ class BotPoller:
                 )
 
 
-async def run_workers(store: Store, family: Family, api: TelegramAPI, summary_worker: Any) -> None:
-    webhook = await api.request("getWebhookInfo", {})
+async def run_workers(
+    store: Store,
+    family: Family,
+    api: TelegramAPI,
+    summary_worker: Any,
+    *,
+    operator_chat: str | None = None,
+) -> None:
+    backoff = 2
+    while True:
+        try:
+            webhook = await api.request("getWebhookInfo", {})
+            break
+        except TelegramError as exc:
+            health.update(store, "telegram", "unavailable")
+            if not exc.transient:
+                raise
+            await asyncio.sleep(max(backoff, exc.retry_after))
+            backoff = min(60, backoff * 2)
     if not isinstance(webhook, dict) or webhook.get("url"):
         raise ConfigError(
             "Use a dedicated bot without an active webhook; existing bot settings are unchanged"
         )
     Enrollment(store, family).import_explicit_destinations()
-    delivery, poller = DeliveryWorker(store, family, api), BotPoller(store, family, api)
+    health.update(store, "telegram", "ready")
+    delivery = DeliveryWorker(store, family, api, operator_chat=operator_chat)
+    poller = BotPoller(store, family, api)
 
     async def summaries() -> None:
         while True:

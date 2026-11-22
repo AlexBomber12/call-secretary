@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 RECIPIENT_DISPUTED = "recipient_disputed"
+OPERATOR_ALERT_PROFILE = ""  # Empty is not a valid family profile ID.
 
 
 class StorageError(RuntimeError):
@@ -337,6 +338,7 @@ class Store:
         *,
         now: float | None = None,
         settle_budget: bool = False,
+        operator_alert: tuple[str, str] | None = None,
     ) -> bool:
         with self.transaction() as db:
             job = db.execute(
@@ -350,6 +352,7 @@ class Store:
                 "INSERT INTO summaries VALUES(?,?,?) ON CONFLICT(call_id) DO NOTHING",
                 (cid, content, time.time() if now is None else now),
             )
+            outbox = None
             if call["profile_id"] and call["status"] != RECIPIENT_DISPUTED:
                 revoked = (
                     db.execute(
@@ -357,22 +360,22 @@ class Store:
                     ).fetchone()
                     is not None
                 )
-                text = str(summary["report"])
-                if not 1 <= len(text) <= 4000:
+                outbox = (
+                    call["profile_id"],
+                    "" if revoked else (destination or ""),
+                    str(summary["report"]),
+                    "blocked" if revoked else ("pending" if destination else "waiting_destination"),
+                )
+            elif operator_alert is not None:
+                operator_chat, text = operator_alert
+                outbox = (OPERATOR_ALERT_PROFILE, operator_chat, text, "pending")
+            if outbox is not None:
+                if not 1 <= len(outbox[2]) <= 4000:
                     raise StorageError("Report must fit one Telegram message")
                 db.execute(
                     "INSERT OR IGNORE INTO outbox(id,call_id,profile_id,chat_id,text,state) "
                     "VALUES(?,?,?,?,?,?)",
-                    (
-                        str(uuid.uuid4()),
-                        cid,
-                        call["profile_id"],
-                        "" if revoked else (destination or ""),
-                        text,
-                        "blocked"
-                        if revoked
-                        else ("pending" if destination else "waiting_destination"),
-                    ),
+                    (str(uuid.uuid4()), cid, *outbox),
                 )
             db.execute(
                 "UPDATE summary_jobs SET state='complete',lease_token=NULL,lease_until=0 "
