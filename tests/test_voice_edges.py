@@ -268,3 +268,45 @@ def test_run_handshake_and_transport_shutdown(rates, finish_tool):
         assert voice.ready and endpoint.interrupts == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("billing_error", [False, True])
+def test_reported_recipient_conflict_precedes_finish_and_billing(rates, billing_error):
+    class Tools(Hooks):
+        def __init__(self):
+            super().__init__()
+            self.handled = []
+
+        async def usage(self, response_id, usage):
+            if billing_error:
+                raise VoiceError("Synthetic billing failure")
+            await super().usage(response_id, usage)
+
+        async def tool(self, name, args):
+            self.handled.append(name)
+            return ToolReply("ok", finish=name == "finish_call")
+
+    async def scenario():
+        hooks = Tools()
+        voice = Realtime(Socket(), Endpoint(), hooks, rates, "p", [], "v")
+        event = done(
+            "last",
+            output=[
+                {"type": "function_call", "name": "finish_call", "call_id": "finish"},
+                {
+                    "type": "function_call",
+                    "name": "report_recipient_conflict",
+                    "call_id": "hold",
+                },
+            ],
+        )
+        if billing_error:
+            with pytest.raises(VoiceError, match="Synthetic billing failure"):
+                await voice.handle(event)
+            assert hooks.handled == ["report_recipient_conflict"]
+        else:
+            await voice.handle(event)
+            assert hooks.handled == ["report_recipient_conflict", "finish_call"]
+            await voice._finish_task
+
+    asyncio.run(scenario())

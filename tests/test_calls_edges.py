@@ -126,5 +126,8 @@ def test_router_excludes_disabled_profiles_and_normalizes_international_prefix(f
     assert router.spoken(disabled.owner_name).profile is None
     prompt = router.instructions(None)
     assert disabled.owner_name not in prompt
-    assert len(router.tools(family.profiles[1])) == 1
+    assert {tool["name"] for tool in router.tools(family.profiles[1])} == {
+        "finish_call",
+        "report_recipient_conflict",
+    }
     assert router.max_prompt_bytes() > 0

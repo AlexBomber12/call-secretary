@@ -62,3 +62,14 @@ def test_recovery_marks_active_call_and_backup_is_consistent(tmp_path):
         store.backup(tmp_path / "backup.sqlite3")
         with sqlite3.connect(tmp_path / "backup.sqlite3") as copy:
             assert copy.execute("SELECT status FROM calls").fetchone()[0] == "interrupted"
+
+
+def test_dispute_requires_an_active_assigned_call(tmp_path):
+    with Store(tmp_path / "state") as store:
+        cid = store.create_call("synthetic")
+        with pytest.raises(StorageError, match="active assigned"):
+            store.dispute_recipient(cid)
+        store.route_call(cid, "member_a", "caller_selected")
+        store.end_call(cid)
+        with pytest.raises(StorageError, match="active assigned"):
+            store.dispute_recipient(cid)

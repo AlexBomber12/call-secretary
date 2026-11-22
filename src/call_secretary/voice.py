@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 
 from call_secretary.audio import RATE, AudioEndpoint, Playback
 from call_secretary.budget import RateCard
+from call_secretary.routing import REPORT_RECIPIENT_CONFLICT
 
 
 class VoiceError(RuntimeError):
@@ -200,6 +201,15 @@ class Realtime:
             await asyncio.sleep(0.1)
         self.finish_event.set()
 
+    async def _call_tool(self, item: dict[str, Any]) -> ToolReply:
+        try:
+            arguments = json.loads(item.get("arguments", "{}"))
+        except (ValueError, TypeError):
+            raise VoiceError("Malformed tool arguments") from None
+        if not isinstance(arguments, dict):
+            raise VoiceError("Tool arguments must be an object")
+        return await self.hooks.tool(str(item["name"]), arguments)
+
     async def handle(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
         if kind == "error":
@@ -287,6 +297,16 @@ class Realtime:
                 return
             self.seen_responses.add(rid)
             self.pending = False
+            output = response.get("output", [])
+            holds: dict[int, ToolReply] = {}
+            if response.get("status") == "completed" and rid not in self.discarded_responses:
+                # Record the delivery hold before billing or a finish tool can end the call.
+                for index, item in enumerate(output):
+                    if (
+                        item.get("type") == "function_call"
+                        and item.get("name") == REPORT_RECIPIENT_CONFLICT
+                    ):
+                        holds[index] = await self._call_tool(item)
             usage = response.get("usage")
             if not isinstance(usage, dict):
                 self.usage_complete = False
@@ -298,7 +318,7 @@ class Realtime:
                 raise VoiceError("Voice response failed")
             if response.get("status") == "cancelled" or rid in self.discarded_responses:
                 if response.get("status") == "completed":
-                    for item in response.get("output", []):
+                    for item in output:
                         if item.get("type") == "function_call":
                             await self.send(
                                 {
@@ -316,16 +336,10 @@ class Realtime:
                     await self.request_response()
                 return
             called = False
-            for item in response.get("output", []):
+            for index, item in enumerate(output):
                 if item.get("type") != "function_call":
                     continue
-                try:
-                    arguments = json.loads(item.get("arguments", "{}"))
-                except (ValueError, TypeError):
-                    raise VoiceError("Malformed tool arguments") from None
-                if not isinstance(arguments, dict):
-                    raise VoiceError("Tool arguments must be an object")
-                reply = await self.hooks.tool(str(item["name"]), arguments)
+                reply = holds[index] if index in holds else await self._call_tool(item)
                 await self.send(
                     {
                         "type": "conversation.item.create",
@@ -339,7 +353,16 @@ class Realtime:
                 if reply.instructions is not None:
                     self.prompt = reply.instructions
                     self.tools = reply.tools or []
-                    await self.send(session_update(self.prompt, self.tools, self.voice, self.rates))
+                    await self.send(
+                        {
+                            "type": "session.update",
+                            "session": {
+                                "type": "realtime",
+                                "instructions": self.prompt,
+                                "tools": self.tools,
+                            },
+                        }
+                    )
                 if reply.finish:
                     self._finish_task = asyncio.create_task(self._finish_after_playback())
                     return
