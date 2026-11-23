@@ -333,13 +333,18 @@ class CallControl:
             formats = self.channel.execute("AT+CPCMFRM?")
             if not any(re.fullmatch(r"\+CPCMFRM:\s*0", line) for line in formats):
                 raise ModemError("Expected SIM7600 PCM at 8 kHz")
-            self.channel.execute("AT+CPCMREG=1")
+            # Starting USB audio can take longer than regular AT commands.
+            self.channel.execute("AT+CPCMREG=1", timeout=8)
+            deadline = time.monotonic() + 8
             for _ in range(6):
-                states = self.channel.execute("AT+CPCMREG?", timeout=0.7)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                states = self.channel.execute("AT+CPCMREG?", timeout=remaining)
                 if any(re.fullmatch(r"\+CPCMREG:\s*1", line) for line in states):
                     self._check(token)
                     return
-                time.sleep(0.2)
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
             raise ModemError("SIM7600 PCM activation did not confirm")
 
     def disable_pcm(self) -> None:

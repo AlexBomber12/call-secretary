@@ -361,6 +361,66 @@ def test_pcm_control_requires_owned_active_call_format_and_confirmation(monkeypa
         assert (b"AT+CPCMREG=1\r" in port.writes) == (outcome == "no_confirmation")
 
 
+def test_pcm_activation_allows_a_late_terminal_response_without_replaying_the_write(monkeypatch):
+    alive = [snapshot(0), b"OK\r\n"]
+    ring = [snapshot(), b"OK\r\n"]
+    port = Port(
+        [
+            [b"OK\r\n"],
+            ring,
+            ring,
+            [b"OK\r\n"],
+            alive,
+            [b"+CPCMFRM: 0\r\nOK\r\n"],
+            [b"OK\r\n"],
+            [b"+CPCMREG: 1\r\nOK\r\n"],
+            alive,
+        ]
+    )
+    channel = ATChannel(port)
+    execute = channel.execute
+    timeouts = []
+
+    def accept_after_firmware_delay(command, *, timeout=3):
+        if command == "AT+CPCMREG=1":
+            timeouts.append(timeout)
+            assert 3.11 < timeout <= 8
+        elif command == "AT+CPCMREG?":
+            assert 0.70 < timeout <= 8
+        return execute(command, timeout=timeout)
+
+    monkeypatch.setattr(channel, "execute", accept_after_firmware_delay)
+    control = CallControl(channel)
+    token = control.poll().token
+    control.answer(token)
+    control.enable_pcm(token)
+    assert len(timeouts) == 1
+    assert port.writes.count(b"AT+CPCMREG=1\r") == 1
+
+
+def test_pcm_activation_does_not_issue_status_queries_after_the_confirmation_window(monkeypatch):
+    ring = [snapshot(), b"OK\r\n"]
+    port = Port(
+        [
+            [b"OK\r\n"],
+            ring,
+            ring,
+            [b"OK\r\n"],
+            [snapshot(0), b"OK\r\n"],
+            [b"+CPCMFRM: 0\r\nOK\r\n"],
+            [b"OK\r\n"],
+        ]
+    )
+    clock = iter([0.0, 8.1])
+    monkeypatch.setattr("call_secretary.sim7600.time.monotonic", lambda: next(clock))
+    control = CallControl(ATChannel(port))
+    token = control.poll().token
+    control.answer(token)
+    with pytest.raises(ModemError, match="activation did not confirm"):
+        control.enable_pcm(token)
+    assert port.writes[-1] == b"AT+CPCMREG=1\r"
+
+
 @pytest.mark.parametrize(
     "outcome",
     ["ok", "activation", "no_call", "answer", "control_close", "fatal_audio", "fatal_and_control"],
