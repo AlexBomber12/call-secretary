@@ -413,6 +413,28 @@ def test_late_first_caller_metadata_preserves_the_same_call():
     assert later.number == "+39000000123"
 
 
+def test_incoming_snapshot_retry_waits_for_a_fresh_confirmation(monkeypatch):
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [b"+CME ERROR: 100\r\n"],
+            [b"RING\r\n", snapshot(identity=3), b"OK\r\n"],
+        ]
+    )
+    delays = []
+
+    def pause(seconds):
+        assert port.writes == [b"AT+CLCC=0\r", b"AT+CLCC\r"]
+        delays.append(seconds)
+
+    monkeypatch.setattr("call_secretary.sim7600.time.sleep", pause)
+    control = CallControl(ATChannel(port))
+    observed = control.poll()
+    assert observed.identity == 3 and observed.state == 4
+    assert delays == [0.5]
+    assert port.writes == [b"AT+CLCC=0\r", b"AT+CLCC\r", b"AT+CLCC\r"]
+
+
 @pytest.mark.parametrize("failure", [b"ERROR", b"+CME ERROR: 10"])
 def test_owned_call_survives_one_clear_snapshot_rejection(failure):
     port = Port(

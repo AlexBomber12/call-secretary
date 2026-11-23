@@ -234,8 +234,10 @@ class CallControl:
         try:
             response = self.channel.execute("AT+CLCC")
         except CommandRejected:
-            # CLCC is read-only, and a rejection without rows preserves framing.
+            # A clean rejection preserves framing. The modem can reject CLCC
+            # during the transition to ringing, so give it time before retrying.
             retried = True
+            time.sleep(0.5)
             response = self.channel.execute("AT+CLCC")
         calls = [parse_call(line) for line in response]
         hints = self.channel.events()
