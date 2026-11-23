@@ -413,6 +413,56 @@ def test_late_first_caller_metadata_preserves_the_same_call():
     assert later.number == "+39000000123"
 
 
+@pytest.mark.parametrize("failures", [1, 3, 4])
+def test_incoming_snapshot_retry_waits_for_a_fresh_confirmation(monkeypatch, failures):
+    port = Port(
+        [[b"OK\r\n"]]
+        + [[b"+CME ERROR: 100\r\n"]] * failures
+        + [[b"RING\r\n", snapshot(identity=3), b"OK\r\n"]]
+    )
+    delays = []
+
+    def pause(seconds):
+        assert port.writes == [b"AT+CLCC=0\r"] + [b"AT+CLCC\r"] * (len(delays) + 1)
+        delays.append(seconds)
+
+    monkeypatch.setattr("call_secretary.sim7600.time.sleep", pause)
+    control = CallControl(ATChannel(port))
+    if failures == 4:
+        with pytest.raises(CommandRejected):
+            control.poll()
+    else:
+        observed = control.poll()
+        assert observed.identity == 3 and observed.state == 4
+    assert delays == [0.5] * min(failures, 3)
+    assert port.writes == [b"AT+CLCC=0\r"] + [b"AT+CLCC\r"] * (len(delays) + 1)
+
+
+def test_repeated_rejection_while_owned_does_not_extend_retries_or_release(monkeypatch):
+    port = Port(
+        [
+            [b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [snapshot(), b"OK\r\n"],
+            [b"OK\r\n"],
+            [b"ERROR\r\n"],
+            [b"ERROR\r\n"],
+            [snapshot(0), b"OK\r\n"],
+        ]
+    )
+    delays = []
+    monkeypatch.setattr("call_secretary.sim7600.time.sleep", delays.append)
+    control = CallControl(ATChannel(port))
+    token = control.poll().token
+    control.answer(token)
+    with pytest.raises(CommandRejected):
+        control.hangup(token)
+    assert delays == [0.5]
+    assert b"AT+CHUP\r" not in port.writes
+    with pytest.raises(ModemError, match="Will not adopt"):
+        control.poll()
+
+
 @pytest.mark.parametrize("failure", [b"ERROR", b"+CME ERROR: 10"])
 def test_owned_call_survives_one_clear_snapshot_rejection(failure):
     port = Port(
