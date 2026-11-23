@@ -231,14 +231,20 @@ class CallControl:
 
     def _poll(self) -> ObservedCall | None:
         retried = False
-        try:
-            response = self.channel.execute("AT+CLCC")
-        except CommandRejected:
-            # A clean rejection preserves framing. The modem can reject CLCC
-            # during the transition to ringing, so give it time before retrying.
-            retried = True
-            time.sleep(0.5)
-            response = self.channel.execute("AT+CLCC")
+        retries_left = 3 if self._current is None else 1
+        while True:
+            try:
+                response = self.channel.execute("AT+CLCC")
+            except CommandRejected:
+                if retries_left == 0:
+                    raise
+                # A clean rejection preserves framing. Give the modem time
+                # to complete its transition before reading another snapshot.
+                retries_left -= 1
+                retried = True
+                time.sleep(0.5)
+            else:
+                break
         calls = [parse_call(line) for line in response]
         hints = self.channel.events()
         ended_hint = any(
